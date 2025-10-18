@@ -1,0 +1,57 @@
+{
+  "app_id": "YOUR_APP_ID",
+  "app_key": "YOUR_APP_KEY",
+  "refresh_token": "",
+  "folder_filter": "Tech News",
+  "_comment_folder_filter": "Optional: Process only articles from this folder. Set to null or remove to process all folders.",
+  "tagging_rules": [
+    {
+      "pattern": "github.com",
+      "match_type": "domain",
+      "tags": ["GitHub", "Development"],
+      "description": "Tag all GitHub articles"
+    },
+    {
+      "pattern": "stackoverflow.com",
+      "match_type": "domain",
+      "tags": ["StackOverflow", "Programming"],
+      "description": "Tag StackOverflow articles"
+    },
+    {
+      "pattern": "medium.com",
+      "match_type": "domain",
+      "tags": ["Medium", "Blog"],
+      "description": "Tag Medium articles"
+    },
+    {
+      "pattern": "/blog/",
+      "match_type": "path",
+      "tags": ["Blog"],
+      "description": "Tag any URL with /blog/ in the path"
+    },
+    {
+      "pattern": "python",
+      "match_type": "full",
+      "tags": ["Python"],
+      "description": "Tag articles with 'python' anywhere in URL"
+    },
+    {
+      "pattern": "youtube\\.com|youtu\\.be",
+      "match_type": "regex",
+      "tags": ["Video", "YouTube"],
+      "description": "Tag YouTube videos using regex"
+    },
+    {
+      "pattern": "reddit\\.com/r/([^/]+)",
+      "match_type": "regex",
+      "tags": ["Reddit"],
+      "description": "Tag Reddit posts"
+    },
+    {
+      "pattern": "news\\.ycombinator\\.com",
+      "match_type": "domain",
+      "tags": ["HackerNews", "Tech News"],
+      "description": "Tag Hacker News articles"
+    }
+  ]
+}
