@@ -92,6 +92,8 @@ Define your tagging rules in `config.json`. Each rule has the following format:
 
 - **`regex`**: Match using regular expressions
   - Example: `"youtube\\.com|youtu\\.be"` matches both YouTube domains
+  - **Capture Groups**: Use parentheses to capture parts of the URL for dynamic tagging
+  - Example: `"reddit\\.com/r/([^/]+)"` captures subreddit names
 
 ### Example Rules
 
@@ -117,10 +119,71 @@ Define your tagging rules in `config.json`. Each rule has the following format:
       "pattern": "reddit.com/r/programming",
       "match_type": "full",
       "tags": ["Reddit", "Programming"]
+    },
+    {
+      "pattern": "reddit\\.com/r/([^/]+)",
+      "match_type": "regex",
+      "tags": ["Reddit", "r/{1}"],
+      "description": "Tag Reddit articles with subreddit name"
     }
   ]
 }
 ```
+
+### Advanced Regex with Capture Groups
+
+When using `"match_type": "regex"`, you can capture parts of the URL and use them in your tag names using placeholders:
+
+- `{0}` - The entire matched text
+- `{1}` - First capture group (first set of parentheses)
+- `{2}` - Second capture group (second set of parentheses)
+- And so on...
+
+#### Examples:
+
+**Reddit Subreddit Tagging:**
+```json
+{
+  "pattern": "reddit\\.com/r/([^/]+)",
+  "match_type": "regex",
+  "tags": ["Reddit", "r/{1}"]
+}
+```
+- URL: `https://reddit.com/r/programming/comments/xyz`
+- Tags applied: `["Reddit", "r/programming"]`
+
+**GitHub Repository Tagging:**
+```json
+{
+  "pattern": "github\\.com/([^/]+)/([^/]+)",
+  "match_type": "regex",
+  "tags": ["GitHub", "{1}/{2}", "User:{1}"]
+}
+```
+- URL: `https://github.com/microsoft/vscode/issues/123`
+- Tags applied: `["GitHub", "microsoft/vscode", "User:microsoft"]`
+
+**News Site Section Tagging:**
+```json
+{
+  "pattern": "example-news\\.com/([^/]+)/",
+  "match_type": "regex",
+  "tags": ["News", "Section:{1}"]
+}
+```
+- URL: `https://example-news.com/technology/article-title`
+- Tags applied: `["News", "Section:technology"]`
+
+**YouTube Channel Tagging:**
+```json
+{
+  "pattern": "youtube\\.com/@([^/?]+)",
+  "match_type": "regex",
+  "tags": ["YouTube", "Channel:{1}"]
+}
+```
+- URL: `https://youtube.com/@TechChannel/videos`
+- Tags applied: `["YouTube", "Channel:TechChannel"]`
 
 ## Usage
 
