@@ -78,6 +78,12 @@ This file contains guidelines and context for AI assistants (like Claude Sonnet 
 - Test OAuth2 flow with invalid/expired tokens
 - Verify regex patterns with various URL formats
 - Test with different article volumes using `--max-articles`
+- **Important**: When using `--max-articles`, verify timestamp behavior doesn't skip articles
+
+### Timestamp Tracking Behavior
+- When `--max-articles` processes exactly the limit, timestamp is NOT updated (prevents missing articles)
+- Only update timestamp when fewer articles than limit are processed (indicating all articles processed)
+- The `--force-timestamp-update` flag can override this behavior but may cause articles to be skipped
 
 ### Edge Cases to Consider
 - Invalid regex patterns in configuration

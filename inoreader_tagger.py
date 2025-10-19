@@ -331,7 +331,7 @@ class InoreaderTagger:
             'errors': 0
         }
     
-    def process_articles(self, max_articles: int = 100, dry_run: bool = False, folder_name: Optional[str] = None, use_timestamp_tracking: bool = True):
+    def process_articles(self, max_articles: int = 100, dry_run: bool = False, folder_name: Optional[str] = None, use_timestamp_tracking: bool = True, force_timestamp_update: bool = False):
         """Process articles and apply tags based on URL patterns"""
         
         # Load last processed timestamp if using timestamp tracking
@@ -354,6 +354,12 @@ class InoreaderTagger:
             
             if not articles:
                 print("No new articles to process")
+                # Update timestamp to current time since we've caught up
+                if use_timestamp_tracking and not dry_run:
+                    import time
+                    current_timestamp = str(int(time.time() * 1000000))  # Current time in microseconds
+                    self._save_last_timestamp(current_timestamp)
+                    print(f"Updated timestamp to current time: {current_timestamp}")
                 return
             
             # Track the newest timestamp we process
@@ -366,10 +372,27 @@ class InoreaderTagger:
                 # Small delay to avoid rate limiting
                 time.sleep(0.1)
             
-            # Save the newest timestamp if we processed articles and not in dry run
-            if use_timestamp_tracking and newest_timestamp and not dry_run:
+            # Only save timestamp if we processed ALL available articles
+            # If we got exactly max_articles, there might be more unprocessed articles,
+            # so don't update timestamp to avoid missing articles on next run
+            should_save_timestamp = (
+                use_timestamp_tracking and 
+                newest_timestamp and 
+                not dry_run and
+                (len(articles) < max_articles or force_timestamp_update)  # Allow override with force flag
+            )
+            
+            if should_save_timestamp:
                 self._save_last_timestamp(newest_timestamp)
                 print(f"Saved last processed timestamp: {newest_timestamp}")
+                if force_timestamp_update and len(articles) == max_articles:
+                    print("WARNING: Timestamp updated despite hitting max-articles limit")
+                    print("Some articles may have been skipped on next run")
+            elif len(articles) == max_articles and use_timestamp_tracking:
+                print(f"Processed {max_articles} articles (limit reached)")
+                print("Timestamp not updated - there may be more unprocessed articles")
+                print("Run again without --max-articles to process remaining articles")
+                print("Or use --force-timestamp-update to update timestamp anyway (may skip articles)")
             
             self._print_stats()
             
@@ -477,6 +500,7 @@ def main():
     parser.add_argument('--config', default='config.json', help='Configuration file path')
     parser.add_argument('--dry-run', action='store_true', help='Run without actually applying tags')
     parser.add_argument('--max-articles', type=int, default=100, help='Maximum number of articles to process')
+    parser.add_argument('--force-timestamp-update', action='store_true', help='Update timestamp even when hitting max-articles limit (may skip articles)')
     parser.add_argument('--no-timestamp-tracking', action='store_true', help='Disable timestamp tracking (process all unread articles)')
     parser.add_argument('--reset-timestamp', action='store_true', help='Reset timestamp tracking (start fresh)')
     
@@ -581,7 +605,8 @@ def main():
         max_articles=args.max_articles, 
         dry_run=args.dry_run, 
         folder_name=folder_name,
-        use_timestamp_tracking=use_timestamp_tracking
+        use_timestamp_tracking=use_timestamp_tracking,
+        force_timestamp_update=args.force_timestamp_update
     )
 
 

@@ -218,9 +218,29 @@ python inoreader_tagger.py --config my-config.json
 ## Command Line Options
 
 ```
---config          Path to configuration file (default: config.json)
---dry-run         Run without actually applying tags
---max-articles    Maximum number of articles to process (default: 100)
+--config                 Path to configuration file (default: config.json)
+--dry-run                Run without actually applying tags
+--max-articles           Maximum number of articles to process (default: 100)
+--force-timestamp-update Update timestamp even when hitting max-articles limit (may skip articles)
+--no-timestamp-tracking  Disable timestamp tracking (process all unread articles)
+--reset-timestamp        Reset timestamp tracking (start fresh)
+```
+
+## Important: --max-articles and Timestamp Tracking
+
+When using `--max-articles`, the script will **NOT** update the timestamp if it processes exactly the maximum number of articles, since there may be more unprocessed articles. This prevents missing articles on subsequent runs.
+
+```bash
+# Safe: Will not update timestamp if 50 articles found (might be more)
+python inoreader_tagger.py --max-articles 50
+
+# Force update (use with caution): May skip articles on next run
+python inoreader_tagger.py --max-articles 50 --force-timestamp-update
+```
+
+To process all remaining articles after hitting a limit, run without `--max-articles`:
+```bash
+python inoreader_tagger.py  # Process all remaining articles
 ```
 
 ## How It Works
