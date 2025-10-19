@@ -356,7 +356,6 @@ class InoreaderTagger:
                 print("No new articles to process")
                 # Update timestamp to current time since we've caught up
                 if use_timestamp_tracking and not dry_run:
-                    import time
                     current_timestamp = str(int(time.time() * 1000000))  # Current time in microseconds
                     self._save_last_timestamp(current_timestamp)
                     print(f"Updated timestamp to current time: {current_timestamp}")
