@@ -2,7 +2,7 @@
 config.json
 
 # Runtime files
-.last_run_timestamp*
+.last_processed_timestamp
 
 # Python
 __pycache__/

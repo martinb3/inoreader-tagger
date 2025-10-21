@@ -125,17 +125,16 @@ class InoreaderAPI:
         }
         
         # Add timestamp filter if provided (convert microseconds to seconds for ot parameter)
-        # NOTE: The 'ot' parameter has a known bug and doesn't work properly.
-        # We still send it in case Inoreader fixes the API in the future,
-        # but we also do client-side filtering as a backup.
+        # The 'ot' parameter compares against timestampUsec (Inoreader's processing time)
         client_filter_timestamp = None
         if since_timestamp:
-            # Convert microsecond timestamp to unix timestamp (seconds)
+            # Convert microsecond timestamp to unix timestamp (seconds) for ot parameter
             timestamp_seconds = int(since_timestamp) // 1000000
             params['ot'] = str(timestamp_seconds)
-            client_filter_timestamp = timestamp_seconds
+            # Keep original microsecond timestamp for client-side filtering
+            client_filter_timestamp = int(since_timestamp)
             print(f"Getting articles since: {timestamp_seconds} ({since_timestamp} microseconds)")
-            print("Using server-side ot parameter + client-side backup filtering")
+            print("Using server-side ot parameter (compares against timestampUsec)")
         
         url = f"{self.BASE_URL}/stream/contents/{stream_id}"
         response = requests.get(url, headers=self._get_headers(), params=params)
@@ -144,17 +143,23 @@ class InoreaderAPI:
         data = response.json()
         articles = data.get('items', [])
         
-        # Client-side timestamp filtering as backup (due to known ot parameter bug)
+        # Client-side timestamp filtering as additional safety check
         if client_filter_timestamp:
             original_count = len(articles)
-            # Filter out articles older than our timestamp threshold
+            # Filter using timestampUsec (same field that ot parameter compares against)
+            def safe_int(value, default=0):
+                try:
+                    return int(value) if value else default
+                except (ValueError, TypeError):
+                    return default
+            
             articles = [
                 article for article in articles 
-                if article.get('published', 0) >= client_filter_timestamp
+                if safe_int(article.get('timestampUsec', 0)) >= client_filter_timestamp
             ]
             filtered_count = len(articles)
             if filtered_count < original_count:
-                print(f"Client-side filtering: kept {filtered_count}/{original_count} articles (filtered out {original_count - filtered_count} older articles)")
+                print(f"Client-side filtering: kept {filtered_count}/{original_count} articles (filtered out {original_count - filtered_count} older articles based on timestampUsec)")
         
         return articles
     
@@ -320,7 +325,7 @@ class URLPatternMatcher:
 class InoreaderTagger:
     """Main class for tagging Inoreader articles"""
     
-    def __init__(self, api: InoreaderAPI, matcher: URLPatternMatcher, timestamp_file: str = ".last_run_timestamp"):
+    def __init__(self, api: InoreaderAPI, matcher: URLPatternMatcher, timestamp_file: str = ".last_processed_timestamp"):
         self.api = api
         self.matcher = matcher
         self.timestamp_file = timestamp_file
@@ -335,11 +340,12 @@ class InoreaderTagger:
         """Process articles and apply tags based on URL patterns"""
         
         # Load last processed timestamp if using timestamp tracking
+        # This becomes the 'ot' parameter (only show articles newer than this)
         since_timestamp = None
         if use_timestamp_tracking:
             since_timestamp = self._load_last_timestamp()
             if since_timestamp:
-                print(f"Resuming from last timestamp: {since_timestamp}")
+                print(f"Using ot parameter from last run: {since_timestamp}")
             else:
                 print("No previous timestamp found, processing recent unread articles")
         
@@ -354,11 +360,9 @@ class InoreaderTagger:
             
             if not articles:
                 print("No new articles to process")
-                # Update timestamp to current time since we've caught up
-                if use_timestamp_tracking and not dry_run:
-                    current_timestamp = str(int(time.time() * 1000000))  # Current time in microseconds
-                    self._save_last_timestamp(current_timestamp)
-                    print(f"Updated timestamp to current time: {current_timestamp}")
+                # Don't update timestamp - we want to use the same ot value next time
+                # since we didn't actually process any new articles
+                print("Keeping existing timestamp for next run")
                 return
             
             # Track the newest timestamp we process
@@ -371,22 +375,35 @@ class InoreaderTagger:
                 # Small delay to avoid rate limiting
                 time.sleep(0.1)
             
-            # Only save timestamp if we processed ALL available articles
+            # Only save timestamp if we processed ALL available articles AND made progress
+            # The saved timestamp becomes the 'ot' parameter for the next run
             # If we got exactly max_articles, there might be more unprocessed articles,
             # so don't update timestamp to avoid missing articles on next run
+            
+            # Check if we actually made progress (newest timestamp is different from starting timestamp)
+            made_progress = True
+            if since_timestamp and newest_timestamp:
+                try:
+                    made_progress = int(newest_timestamp) > int(since_timestamp)
+                except (ValueError, TypeError):
+                    made_progress = True  # If we can't compare, assume progress was made
+            
             should_save_timestamp = (
                 use_timestamp_tracking and 
                 newest_timestamp and 
                 not dry_run and
+                made_progress and  # Only save if we actually made progress
                 (len(articles) < max_articles or force_timestamp_update)  # Allow override with force flag
             )
             
             if should_save_timestamp:
                 self._save_last_timestamp(newest_timestamp)
-                print(f"Saved last processed timestamp: {newest_timestamp}")
+                print(f"Saved newest timestamp for next run's ot parameter: {newest_timestamp}")
                 if force_timestamp_update and len(articles) == max_articles:
                     print("WARNING: Timestamp updated despite hitting max-articles limit")
                     print("Some articles may have been skipped on next run")
+            elif use_timestamp_tracking and newest_timestamp and not made_progress:
+                print("No progress made - keeping existing timestamp (all articles had same or older timestampUsec)")
             elif len(articles) == max_articles and use_timestamp_tracking:
                 print(f"Processed {max_articles} articles (limit reached)")
                 print("Timestamp not updated - there may be more unprocessed articles")
@@ -421,20 +438,43 @@ class InoreaderTagger:
             self.stats['skipped'] += 1
             return
         
+        # Get existing tags from article categories
+        existing_tags = set()
+        categories = article.get('categories', [])
+        for category in categories:
+            if '/label/' in category:
+                # Extract tag name from category like "user/1005421489/label/Reddit"
+                tag_name = category.split('/label/')[-1]
+                existing_tags.add(tag_name)
+        
+        # Filter out tags that are already applied
+        tags_to_add = [tag for tag in tags_to_apply if tag not in existing_tags]
+        already_applied = [tag for tag in tags_to_apply if tag in existing_tags]
+        
         print(f"\n  Article: {title}")
         print(f"  URL: {url}")
-        print(f"  Tags to apply: {', '.join(tags_to_apply)}")
+        print(f"  Matched tags: {', '.join(tags_to_apply)}")
+        
+        if already_applied:
+            print(f"  Already has tags: {', '.join(already_applied)}")
+        
+        if not tags_to_add:
+            print(f"  All tags already applied - skipping")
+            self.stats['skipped'] += 1
+            return
+        
+        print(f"  Tags to add: {', '.join(tags_to_add)}")
         
         if dry_run:
             print(f"  [DRY RUN] Would apply the following tags:")
-            for tag in tags_to_apply:
+            for tag in tags_to_add:
                 print(f"    ✓ Would add tag: {tag}")
             self.stats['tagged'] += 1  # Count as tagged for stats in dry run
             return
         
         # Apply tags
         success = True
-        for tag in tags_to_apply:
+        for tag in tags_to_add:
             try:
                 if self.api.add_tag_to_article(article_id, tag):
                     print(f"    ✓ Applied tag: {tag}")
@@ -446,11 +486,11 @@ class InoreaderTagger:
                 success = False
                 self.stats['errors'] += 1
         
-        if success:
+        if success and tags_to_add:
             self.stats['tagged'] += 1
     
     def _load_last_timestamp(self) -> Optional[str]:
-        """Load the last processed timestamp from file"""
+        """Load the last processed timestamp from file (used as 'ot' parameter for next run)"""
         try:
             if os.path.exists(self.timestamp_file):
                 with open(self.timestamp_file, 'r') as f:
@@ -460,7 +500,7 @@ class InoreaderTagger:
         return None
     
     def _save_last_timestamp(self, timestamp_usec: str):
-        """Save the last processed timestamp to file"""
+        """Save the newest article timestamp to file (becomes 'ot' parameter for next run)"""
         try:
             with open(self.timestamp_file, 'w') as f:
                 f.write(timestamp_usec)
@@ -475,8 +515,14 @@ class InoreaderTagger:
         newest = None
         for article in articles:
             timestamp = article.get('timestampUsec')
-            if timestamp and (newest is None or int(timestamp) > int(newest)):
-                newest = timestamp
+            if timestamp:
+                try:
+                    timestamp_int = int(timestamp)
+                    if newest is None or timestamp_int > int(newest):
+                        newest = timestamp
+                except (ValueError, TypeError):
+                    # Skip invalid timestamps
+                    continue
         
         return newest
     
