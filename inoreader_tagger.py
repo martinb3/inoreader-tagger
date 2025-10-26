@@ -124,17 +124,17 @@ class InoreaderAPI:
             'xt': 'user/-/state/com.google/read'  # Exclude read items (server-side filtering)
         }
         
-        # Add timestamp filter if provided (convert microseconds to seconds for ot parameter)
-        # The 'ot' parameter compares against timestampUsec (Inoreader's processing time)
+        # Add timestamp filter if provided (using microsecond timestamp)
+        # The 'ot' parameter expects microsecond timestamp (same format as timestampUsec)
         client_filter_timestamp = None
         if since_timestamp:
-            # Convert microsecond timestamp to unix timestamp (seconds) for ot parameter
-            timestamp_seconds = int(since_timestamp) // 1000000
-            params['ot'] = str(timestamp_seconds)
-            # Keep original microsecond timestamp for client-side filtering
+            # Use microsecond timestamp directly for ot parameter
+            timestamp_microseconds = int(since_timestamp)
+            params['ot'] = str(timestamp_microseconds)
+            # Keep same microsecond timestamp for client-side filtering
             client_filter_timestamp = int(since_timestamp)
-            print(f"Getting articles since: {timestamp_seconds} ({since_timestamp} microseconds)")
-            print("Using server-side ot parameter (compares against timestampUsec)")
+            print(f"Getting articles since microsecond timestamp: {timestamp_microseconds}")
+            print("Using server-side ot parameter with microsecond timestamp")
         
         url = f"{self.BASE_URL}/stream/contents/{stream_id}"
         response = requests.get(url, headers=self._get_headers(), params=params)
@@ -146,7 +146,7 @@ class InoreaderAPI:
         # Client-side timestamp filtering as additional safety check
         if client_filter_timestamp:
             original_count = len(articles)
-            # Filter using timestampUsec (same field that ot parameter compares against)
+            # Filter using microsecond timestamp (same format as timestampUsec)
             def safe_int(value, default=0):
                 try:
                     return int(value) if value else default
@@ -159,7 +159,7 @@ class InoreaderAPI:
             ]
             filtered_count = len(articles)
             if filtered_count < original_count:
-                print(f"Client-side filtering: kept {filtered_count}/{original_count} articles (filtered out {original_count - filtered_count} older articles based on timestampUsec)")
+                print(f"Client-side filtering: kept {filtered_count}/{original_count} articles (filtered out {original_count - filtered_count} older articles based on microsecond timestamp)")
         
         return articles
     
@@ -345,7 +345,7 @@ class InoreaderTagger:
         if use_timestamp_tracking:
             since_timestamp = self._load_last_timestamp()
             if since_timestamp:
-                print(f"Using ot parameter from last run: {since_timestamp}")
+                print(f"Using microsecond timestamp from last run: {since_timestamp}")
             else:
                 print("No previous timestamp found, processing recent unread articles")
         
@@ -398,12 +398,12 @@ class InoreaderTagger:
             
             if should_save_timestamp:
                 self._save_last_timestamp(newest_timestamp)
-                print(f"Saved newest timestamp for next run's ot parameter: {newest_timestamp}")
+                print(f"Saved newest microsecond timestamp for next run: {newest_timestamp}")
                 if force_timestamp_update and len(articles) == max_articles:
                     print("WARNING: Timestamp updated despite hitting max-articles limit")
                     print("Some articles may have been skipped on next run")
             elif use_timestamp_tracking and newest_timestamp and not made_progress:
-                print("No progress made - keeping existing timestamp (all articles had same or older timestampUsec)")
+                print("No progress made - keeping existing timestamp (all articles had same or older microsecond timestamp)")
             elif len(articles) == max_articles and use_timestamp_tracking:
                 print(f"Processed {max_articles} articles (limit reached)")
                 print("Timestamp not updated - there may be more unprocessed articles")
@@ -490,7 +490,7 @@ class InoreaderTagger:
             self.stats['tagged'] += 1
     
     def _load_last_timestamp(self) -> Optional[str]:
-        """Load the last processed timestamp from file (used as 'ot' parameter for next run)"""
+        """Load the last processed microsecond timestamp from file (used as 'ot' parameter for next run)"""
         try:
             if os.path.exists(self.timestamp_file):
                 with open(self.timestamp_file, 'r') as f:
@@ -499,27 +499,28 @@ class InoreaderTagger:
             print(f"Warning: Could not load last timestamp: {e}")
         return None
     
-    def _save_last_timestamp(self, timestamp_usec: str):
-        """Save the newest article timestamp to file (becomes 'ot' parameter for next run)"""
+    def _save_last_timestamp(self, timestamp_microseconds: str):
+        """Save the newest article microsecond timestamp to file (becomes 'ot' parameter for next run)"""
         try:
             with open(self.timestamp_file, 'w') as f:
-                f.write(timestamp_usec)
+                f.write(timestamp_microseconds)
         except Exception as e:
             print(f"Warning: Could not save timestamp: {e}")
     
     def _get_newest_timestamp(self, articles: List[Dict]) -> Optional[str]:
-        """Get the newest timestamp from a list of articles"""
+        """Get the newest microsecond timestamp from a list of articles"""
         if not articles:
             return None
         
         newest = None
         for article in articles:
-            timestamp = article.get('timestampUsec')
-            if timestamp:
+            timestamp_usec = article.get('timestampUsec')
+            if timestamp_usec:
                 try:
-                    timestamp_int = int(timestamp)
+                    # Use microsecond timestamp directly
+                    timestamp_int = int(timestamp_usec)
                     if newest is None or timestamp_int > int(newest):
-                        newest = timestamp
+                        newest = str(timestamp_int)
                 except (ValueError, TypeError):
                     # Skip invalid timestamps
                     continue
