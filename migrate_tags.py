@@ -33,64 +33,69 @@ class TagMigrator:
             r'^reddit$',           # Match plain 'reddit' tag
         ]
     
-    def process_articles_incrementally(self, batch_size: int = 100, max_articles: int = None, folder_filter: str = None, feed_filter: str = None, dry_run: bool = True):
-        """Process articles incrementally as we fetch them - no giant lists"""
+    def process_articles_by_old_tags(self, batch_size: int = 100, max_articles: int = None, folder_filter: str = None, feed_filter: str = None, dry_run: bool = True):
+        """Process articles by searching for specific old tags first - much more efficient!"""
         
-        # Determine which stream to use
-        if folder_filter:
-            import urllib.parse
-            encoded_folder = urllib.parse.quote(folder_filter, safe='')
-            stream_id = f"user/-/label/{encoded_folder}"
-            print(f"Processing articles from folder '{folder_filter}' (batch size: {batch_size})...")
-        else:
-            stream_id = "user/-/state/com.google/reading-list"
-            print(f"Processing articles from all folders (batch size: {batch_size})...")
-        
-        continuation = None
-        processed_count = 0
         migrated_count = 0
+        processed_count = 0
         
-        while True:
-            # Get articles from the specified stream
-            params = {
-                'n': batch_size,
-                'output': 'json'
-            }
+        # First, get list of old tags that exist in the system
+        old_tags_to_migrate = self._find_old_tags_in_system()
+        
+        if not old_tags_to_migrate:
+            print("🎉 No old tags found in the system - migration not needed!")
+            return
+        
+        print(f"🔍 Found {len(old_tags_to_migrate)} old tag(s) to migrate: {', '.join(old_tags_to_migrate)}")
+        print()
+        
+        # Process articles for each old tag
+        for old_tag in old_tags_to_migrate:
+            if max_articles and migrated_count >= max_articles:
+                print(f"\n✅ Reached maximum of {max_articles} articles to migrate")
+                break
+                
+            print(f"🏷️  Processing articles with old tag: '{old_tag}'")
             
-            if continuation:
-                params['c'] = continuation
+            # Use the tag-specific stream to get articles with this old tag
+            stream_id = f"user/-/label/{old_tag}"
+            continuation = None
             
-            try:
-                response = self.api.get_stream_contents(
-                    stream_id=stream_id,
-                    count=batch_size,
-                    continuation=continuation
-                )
-                
-                articles = response.get('items', [])
-                continuation = response.get('continuation')
-                
-                if not articles:
-                    print(f"  No more articles found")
-                    break
-                
-                # Process each article immediately
-                for article in articles:
-                    processed_count += 1
+            while True:
+                # Get articles with this specific old tag
+                try:
+                    response = self.api.get_stream_contents(
+                        stream_id=stream_id,
+                        count=batch_size,
+                        continuation=continuation
+                    )
                     
-                    # Apply feed filter if specified
-                    if feed_filter:
-                        origin = article.get('origin', {})
-                        feed_title = origin.get('title', '').lower()
-                        if feed_filter.lower() not in feed_title:
-                            continue
+                    articles = response.get('items', [])
+                    continuation = response.get('continuation')
                     
-                    # Check if this article has old tags we need to migrate
-                    article_tags = self._extract_tags_from_article(article)
-                    if any(self._should_remove_old_tag(tag) for tag in article_tags):
-                        migrated_count += 1
+                    if not articles:
+                        print(f"    No more articles with tag '{old_tag}'")
+                        break
+                    
+                    # Process each article with this old tag
+                    for article in articles:
+                        processed_count += 1
                         
-                        print(f"\n[{migrated_count}] Processing article with old tags...")
+                        # Apply folder filter if specified
+                        if folder_filter:
+                            article_tags = self._extract_tags_from_article(article)
+                            if folder_filter not in article_tags:
+                                continue
+                        
+                        # Apply feed filter if specified
+                        if feed_filter:
+                            origin = article.get('origin', {})
+                            feed_title = origin.get('title', '').lower()
+                            if feed_filter.lower() not in feed_title:
+                                continue
+                        
+                        migrated_count += 1
+                        print(f"\n[{migrated_count}] Processing article with old tag '{old_tag}'...")
                         
                         try:
                             self.migrate_article_tags(article, dry_run=dry_run)
@@ -107,23 +112,46 @@ class TagMigrator:
                         if max_articles and migrated_count >= max_articles:
                             print(f"\n✅ Reached maximum of {max_articles} articles to migrate")
                             break
-                
-                print(f"  📊 Batch complete: {processed_count} total articles scanned, {migrated_count} with old tags processed")
-                
-                # Stop if we've reached max articles or no continuation
-                if not continuation or (max_articles and migrated_count >= max_articles):
-                    break
                     
-                # Small delay to avoid rate limiting
-                time.sleep(0.5)
-                
-            except Exception as e:
-                print(f"💥 Error fetching articles: {e}")
-                if hasattr(e, 'response') and e.response is not None:
-                    print(f"   HTTP {e.response.status_code}: {e.response.text}")
-                raise Exception(f"Failed to fetch articles: {e}")
+                    # Stop if we've reached max articles or no continuation
+                    if not continuation or (max_articles and migrated_count >= max_articles):
+                        break
+                        
+                    # Small delay to avoid rate limiting
+                    time.sleep(0.5)
+                    
+                except Exception as e:
+                    print(f"💥 Error fetching articles for tag '{old_tag}': {e}")
+                    if hasattr(e, 'response') and e.response is not None:
+                        print(f"   HTTP {e.response.status_code}: {e.response.text}")
+                    # Continue with next tag instead of failing completely
+                    print(f"⚠️  Skipping remaining articles with tag '{old_tag}' due to error")
+                    break
+            
+            print(f"    ✅ Completed processing tag '{old_tag}'")
         
         print(f"\n🏁 Final results: Processed {migrated_count} articles with old tags out of {processed_count} total articles scanned")
+    
+    def _find_old_tags_in_system(self) -> List[str]:
+        """Find all old tags that exist in the user's tag list"""
+        try:
+            all_tags = self.api.get_tags()
+            old_tags = []
+            
+            for tag_info in all_tags:
+                tag_id = tag_info.get('id', '')
+                if '/label/' in tag_id:
+                    tag_name = tag_id.split('/label/')[-1]
+                    if self._should_remove_old_tag(tag_name):
+                        old_tags.append(tag_name)
+            
+            return sorted(old_tags)
+            
+        except Exception as e:
+            print(f"⚠️  Warning: Could not fetch tag list: {e}")
+            print("   Falling back to common old tag patterns...")
+            # Fallback to common old tags we know about
+            return ['reddit-dji', 'reddit-aws', 'reddit-Hue', 'reddit-Nest', 'reddit']
     
     def _extract_tags_from_article(self, article: Dict) -> Set[str]:
         """Extract user tags from article categories"""
@@ -290,13 +318,16 @@ class TagMigrator:
         
         # Show migration approach
         print("Migration approach:")
+        print("  - Find existing old tags in the system")
+        print("  - Process articles by old tag (instead of chronologically)")
         print("  - Remove old reddit-* tags")
         print("  - Extract correct tags from article URLs using current tagging rules")
         print("  - Apply correct tags based on actual subreddit")
+        print("  - This targets articles that need migration directly!")
         print()
         
-        # Process articles incrementally - no giant lists
-        self.process_articles_incrementally(
+        # Process articles by targeting old tags directly - much more efficient!
+        self.process_articles_by_old_tags(
             batch_size=batch_size,
             max_articles=max_articles,
             folder_filter=folder_filter,
