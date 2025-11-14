@@ -71,7 +71,20 @@ class InoreaderAPI:
         }
         
         response = requests.post(self.AUTH_URL, data=data)
-        response.raise_for_status()
+        
+        if response.status_code != 200:
+            try:
+                error_data = response.json()
+                error_msg = error_data.get('error_description', error_data.get('error', 'Unknown error'))
+                print(f"Token refresh failed: {error_msg}")
+                print(f"This usually means the refresh token has expired and you need to re-authenticate.")
+            except:
+                print(f"Token refresh failed with HTTP {response.status_code}")
+                print(f"Response: {response.text}")
+            
+            # Clear the invalid refresh token so user gets guided through re-auth
+            self.refresh_token = None
+            raise ValueError("Refresh token expired or invalid - re-authentication required")
         
         token_data = response.json()
         self.access_token = token_data['access_token']
@@ -565,11 +578,28 @@ def main():
         return
     
     # Initialize API
-    api = InoreaderAPI(
-        app_id=config['app_id'],
-        app_key=config['app_key'],
-        refresh_token=config.get('refresh_token')
-    )
+    try:
+        api = InoreaderAPI(
+            app_id=config['app_id'],
+            app_key=config['app_key'],
+            refresh_token=config.get('refresh_token')
+        )
+    except ValueError as e:
+        if "re-authentication required" in str(e):
+            print(f"\n⚠️  {e}")
+            # Clear the invalid refresh token from config
+            if 'refresh_token' in config:
+                config.pop('refresh_token')
+                with open(args.config, 'w') as f:
+                    json.dump(config, f, indent=2)
+                print(f"✓ Cleared invalid refresh token from {args.config}")
+            # Initialize API without refresh token to trigger re-auth flow
+            api = InoreaderAPI(
+                app_id=config['app_id'],
+                app_key=config['app_key']
+            )
+        else:
+            raise
     
     # If no refresh token, guide user through authentication
     if not api.refresh_token:
