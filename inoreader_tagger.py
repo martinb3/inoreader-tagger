@@ -185,8 +185,12 @@ class InoreaderAPI:
         data = response.json()
         return [tag for tag in data.get('tags', []) if '/label/' in tag.get('id', '')]
     
-    def add_tag_to_article(self, article_id: str, tag_name: str) -> bool:
-        """Add a tag to an article"""
+    def add_tag_to_article(self, article_id: str, tag_name: str) -> tuple[bool, str]:
+        """Add a tag to an article
+        
+        Returns:
+            tuple: (success: bool, error_message: str)
+        """
         # Ensure tag name is properly formatted
         if not tag_name.startswith('user/-/label/'):
             tag_name = f'user/-/label/{tag_name}'
@@ -199,7 +203,19 @@ class InoreaderAPI:
         }
         
         response = requests.post(url, headers=self._get_headers(), data=data)
-        return response.status_code == 200
+        
+        if response.status_code == 200:
+            return True, ""
+        else:
+            error_msg = f"HTTP {response.status_code}"
+            try:
+                # Try to get more details from response
+                response_text = response.text.strip()
+                if response_text:
+                    error_msg += f": {response_text}"
+            except:
+                pass
+            return False, error_msg
     
     def remove_tag_from_article(self, article_id: str, tag_name: str) -> bool:
         """Remove a tag from an article"""
@@ -338,16 +354,18 @@ class URLPatternMatcher:
 class InoreaderTagger:
     """Main class for tagging Inoreader articles"""
     
-    def __init__(self, api: InoreaderAPI, matcher: URLPatternMatcher, timestamp_file: str = ".last_processed_timestamp"):
+    def __init__(self, api: InoreaderAPI, matcher: URLPatternMatcher, timestamp_file: str = ".last_processed_timestamp", verbose: bool = False):
         self.api = api
         self.matcher = matcher
         self.timestamp_file = timestamp_file
+        self.verbose = verbose
         self.stats = {
             'processed': 0,
             'tagged': 0,
             'skipped': 0,
             'errors': 0
         }
+        self.newest_successful_timestamp = None  # Track newest timestamp from successfully processed articles
     
     def process_articles(self, max_articles: int = 100, dry_run: bool = False, folder_name: Optional[str] = None, use_timestamp_tracking: bool = True, force_timestamp_update: bool = False):
         """Process articles and apply tags based on URL patterns"""
@@ -378,15 +396,26 @@ class InoreaderTagger:
                 print("Keeping existing timestamp for next run")
                 return
             
-            # Track the newest timestamp we process
-            newest_timestamp = self._get_newest_timestamp(articles)
-            
             for article in articles:
                 self.stats['processed'] += 1
-                self._process_single_article(article, dry_run)
+                success = self._process_single_article(article, dry_run)
+                
+                # Track timestamp only for successfully processed articles
+                if success:
+                    timestamp_usec = article.get('timestampUsec')
+                    if timestamp_usec:
+                        try:
+                            timestamp_int = int(timestamp_usec)
+                            if self.newest_successful_timestamp is None or timestamp_int > int(self.newest_successful_timestamp):
+                                self.newest_successful_timestamp = str(timestamp_int)
+                        except (ValueError, TypeError):
+                            pass  # Skip invalid timestamps
                 
                 # Small delay to avoid rate limiting
                 time.sleep(0.1)
+            
+            # Use the newest timestamp from successfully processed articles
+            newest_timestamp = self.newest_successful_timestamp
             
             # Only save timestamp if we processed ALL available articles AND made progress
             # The saved timestamp becomes the 'ot' parameter for the next run
@@ -415,8 +444,11 @@ class InoreaderTagger:
                 if force_timestamp_update and len(articles) == max_articles:
                     print("WARNING: Timestamp updated despite hitting max-articles limit")
                     print("Some articles may have been skipped on next run")
+            elif use_timestamp_tracking and not newest_timestamp and self.stats['errors'] > 0:
+                print(f"Timestamp not updated - all articles had errors during tagging")
+                print("Fix the errors and run again to process these articles")
             elif use_timestamp_tracking and newest_timestamp and not made_progress:
-                print("No progress made - keeping existing timestamp (all articles had same or older microsecond timestamp)")
+                print("No progress made - keeping existing timestamp (all successfully processed articles had same or older microsecond timestamp)")
             elif len(articles) == max_articles and use_timestamp_tracking:
                 print(f"Processed {max_articles} articles (limit reached)")
                 print("Timestamp not updated - there may be more unprocessed articles")
@@ -429,8 +461,12 @@ class InoreaderTagger:
             print(f"Error processing articles: {e}")
             self.stats['errors'] += 1
     
-    def _process_single_article(self, article: Dict, dry_run: bool):
-        """Process a single article"""
+    def _process_single_article(self, article: Dict, dry_run: bool) -> bool:
+        """Process a single article
+        
+        Returns:
+            bool: True if article was processed successfully, False otherwise
+        """
         title = article.get('title', 'Untitled')
         article_id = article.get('id', '')
         
@@ -441,7 +477,7 @@ class InoreaderTagger:
         if not url:
             print(f"  - Skipping '{title}': No URL found")
             self.stats['skipped'] += 1
-            return
+            return False
         
         # Match URL against patterns
         tags_to_apply = self.matcher.match_url(url)
@@ -449,7 +485,7 @@ class InoreaderTagger:
         if not tags_to_apply:
             print(f"  - No tags matched for '{title}' ({url})")
             self.stats['skipped'] += 1
-            return
+            return False
         
         # Get existing tags from article categories
         existing_tags = set()
@@ -474,7 +510,7 @@ class InoreaderTagger:
         if not tags_to_add:
             print(f"  All tags already applied - skipping")
             self.stats['skipped'] += 1
-            return
+            return True  # Return True since article already has correct tags
         
         print(f"  Tags to add: {', '.join(tags_to_add)}")
         
@@ -483,24 +519,36 @@ class InoreaderTagger:
             for tag in tags_to_add:
                 print(f"    ✓ Would add tag: {tag}")
             self.stats['tagged'] += 1  # Count as tagged for stats in dry run
-            return
+            return True  # Return True for dry run
         
         # Apply tags
         success = True
         for tag in tags_to_add:
             try:
-                if self.api.add_tag_to_article(article_id, tag):
+                if self.verbose:
+                    print(f"    → Attempting to apply tag: {tag} to article ID: {article_id}")
+                
+                tag_success, error_msg = self.api.add_tag_to_article(article_id, tag)
+                if tag_success:
                     print(f"    ✓ Applied tag: {tag}")
                 else:
                     print(f"    ✗ Failed to apply tag: {tag}")
+                    if error_msg:
+                        print(f"      Error: {error_msg}")
                     success = False
+                    self.stats['errors'] += 1
             except Exception as e:
                 print(f"    ✗ Error applying tag {tag}: {e}")
+                if self.verbose:
+                    import traceback
+                    print(f"      Full traceback: {traceback.format_exc()}")
                 success = False
                 self.stats['errors'] += 1
         
         if success and tags_to_add:
             self.stats['tagged'] += 1
+        
+        return success
     
     def _load_last_timestamp(self) -> Optional[str]:
         """Load the last processed microsecond timestamp from file (used as 'ot' parameter for next run)"""
@@ -562,6 +610,7 @@ def main():
     parser.add_argument('--force-timestamp-update', action='store_true', help='Update timestamp even when hitting max-articles limit (may skip articles)')
     parser.add_argument('--no-timestamp-tracking', action='store_true', help='Disable timestamp tracking (process all unread articles)')
     parser.add_argument('--reset-timestamp', action='store_true', help='Reset timestamp tracking (start fresh)')
+    parser.add_argument('--verbose', '-v', action='store_true', help='Enable verbose output for debugging')
     
     args = parser.parse_args()
     
@@ -649,7 +698,7 @@ def main():
     
     # Initialize matcher and tagger
     matcher = URLPatternMatcher(config['tagging_rules'])
-    tagger = InoreaderTagger(api, matcher)
+    tagger = InoreaderTagger(api, matcher, verbose=args.verbose)
     
     # Handle timestamp reset
     if args.reset_timestamp:
