@@ -217,6 +217,43 @@ class InoreaderAPI:
                 pass
             return False, error_msg
     
+    def add_tag_to_articles_batch(self, article_ids: List[str], tag_name: str) -> tuple[bool, str]:
+        """Add a tag to multiple articles in one API call
+        
+        Args:
+            article_ids: List of article IDs to tag
+            tag_name: Tag to apply
+            
+        Returns:
+            tuple: (success: bool, error_message: str)
+        """
+        if not article_ids:
+            return True, ""
+            
+        # Ensure tag name is properly formatted
+        if not tag_name.startswith('user/-/label/'):
+            tag_name = f'user/-/label/{tag_name}'
+        
+        url = f"{self.BASE_URL}/edit-tag"
+        # Build data with multiple 'i' parameters for batch operation
+        data = [('a', tag_name), ('ac', 'edit-tags')]
+        for article_id in article_ids:
+            data.append(('i', article_id))
+        
+        response = requests.post(url, headers=self._get_headers(), data=data)
+        
+        if response.status_code == 200:
+            return True, ""
+        else:
+            error_msg = f"HTTP {response.status_code}"
+            try:
+                response_text = response.text.strip()
+                if response_text:
+                    error_msg += f": {response_text}"
+            except:
+                pass
+            return False, error_msg
+    
     def remove_tag_from_article(self, article_id: str, tag_name: str) -> bool:
         """Remove a tag from an article"""
         if not tag_name.startswith('user/-/label/'):
@@ -231,6 +268,42 @@ class InoreaderAPI:
         
         response = requests.post(url, headers=self._get_headers(), data=data)
         return response.status_code == 200
+    
+    def remove_tag_from_articles_batch(self, article_ids: List[str], tag_name: str) -> tuple[bool, str]:
+        """Remove a tag from multiple articles in one API call
+        
+        Args:
+            article_ids: List of article IDs to untag
+            tag_name: Tag to remove
+            
+        Returns:
+            tuple: (success: bool, error_message: str)
+        """
+        if not article_ids:
+            return True, ""
+            
+        if not tag_name.startswith('user/-/label/'):
+            tag_name = f'user/-/label/{tag_name}'
+        
+        url = f"{self.BASE_URL}/edit-tag"
+        # Build data with multiple 'i' parameters for batch operation
+        data = [('r', tag_name), ('ac', 'edit-tags')]
+        for article_id in article_ids:
+            data.append(('i', article_id))
+        
+        response = requests.post(url, headers=self._get_headers(), data=data)
+        
+        if response.status_code == 200:
+            return True, ""
+        else:
+            error_msg = f"HTTP {response.status_code}"
+            try:
+                response_text = response.text.strip()
+                if response_text:
+                    error_msg += f": {response_text}"
+            except:
+                pass
+            return False, error_msg
     
     def get_unread_counts(self) -> Dict:
         """Get unread counts for all folders and feeds"""
@@ -367,8 +440,17 @@ class InoreaderTagger:
         }
         self.newest_successful_timestamp = None  # Track newest timestamp from successfully processed articles
     
-    def process_articles(self, max_articles: int = 100, dry_run: bool = False, folder_name: Optional[str] = None, use_timestamp_tracking: bool = True, force_timestamp_update: bool = False):
-        """Process articles and apply tags based on URL patterns"""
+    def process_articles(self, max_articles: int = 100, batch_size: int = 25, dry_run: bool = False, folder_name: Optional[str] = None, use_timestamp_tracking: bool = True, force_timestamp_update: bool = False):
+        """Process articles and apply tags based on URL patterns
+        
+        Args:
+            max_articles: Maximum total articles to process
+            batch_size: Number of articles to fetch and process per batch
+            dry_run: If True, don't actually apply tags
+            folder_name: Optional folder to filter articles
+            use_timestamp_tracking: Track timestamps between runs
+            force_timestamp_update: Update timestamp even when hitting max_articles limit
+        """
         
         # Load last processed timestamp if using timestamp tracking
         # This becomes the 'ot' parameter (only show articles newer than this)
@@ -381,27 +463,62 @@ class InoreaderTagger:
                 print("No previous timestamp found, processing recent unread articles")
         
         if folder_name:
-            print(f"Fetching up to {max_articles} unread articles from folder '{folder_name}'...")
+            print(f"Fetching up to {max_articles} unread articles (batches of {batch_size}) from folder '{folder_name}'...")
         else:
-            print(f"Fetching up to {max_articles} unread articles from all folders...")
+            print(f"Fetching up to {max_articles} unread articles (batches of {batch_size}) from all folders...")
         
         try:
-            articles = self.api.get_unread_articles(max_articles, folder_name, since_timestamp)
-            print(f"Found {len(articles)} unread articles")
+            total_processed = 0
+            all_articles_processed = []
             
-            if not articles:
-                print("No new articles to process")
-                # Don't update timestamp - we want to use the same ot value next time
-                # since we didn't actually process any new articles
-                print("Keeping existing timestamp for next run")
-                return
-            
-            for article in articles:
-                self.stats['processed'] += 1
-                success = self._process_single_article(article, dry_run)
+            while total_processed < max_articles:
+                # Fetch next batch
+                remaining = max_articles - total_processed
+                fetch_count = min(batch_size, remaining)
                 
-                # Track timestamp only for successfully processed articles
-                if success:
+                articles = self.api.get_unread_articles(fetch_count, folder_name, since_timestamp)
+                
+                if not articles:
+                    if total_processed == 0:
+                        print("No new articles to process")
+                        print("Keeping existing timestamp for next run")
+                    else:
+                        print(f"\nNo more articles found (processed {total_processed} total)")
+                    break
+                
+                print(f"\n{'='*50}")
+                print(f"Processing batch: {len(articles)} articles (total so far: {total_processed})")
+                print(f"{'='*50}")
+                
+                # Process batch and collect articles that need tagging
+                batch_results = self._process_article_batch(articles, dry_run)
+                
+                # Track processed articles for timestamp tracking
+                all_articles_processed.extend(articles)
+                total_processed += len(articles)
+                
+                # Update statistics
+                for result in batch_results:
+                    if result['success']:
+                        self.stats['tagged'] += 1
+                    elif result['skipped']:
+                        self.stats['skipped'] += 1
+                    if result['errors'] > 0:
+                        self.stats['errors'] += result['errors']
+                    self.stats['processed'] += 1
+                
+                # If we got fewer articles than requested, we've processed everything
+                if len(articles) < fetch_count:
+                    print(f"\nReached end of unread articles (processed {total_processed} total)")
+                    break
+                
+                # Small delay between batches
+                if total_processed < max_articles:
+                    time.sleep(0.5)
+            
+            # Track newest timestamp from all successfully processed articles
+            if all_articles_processed:
+                for article in all_articles_processed:
                     timestamp_usec = article.get('timestampUsec')
                     if timestamp_usec:
                         try:
@@ -409,48 +526,40 @@ class InoreaderTagger:
                             if self.newest_successful_timestamp is None or timestamp_int > int(self.newest_successful_timestamp):
                                 self.newest_successful_timestamp = str(timestamp_int)
                         except (ValueError, TypeError):
-                            pass  # Skip invalid timestamps
-                
-                # Small delay to avoid rate limiting
-                time.sleep(0.1)
+                            pass
             
             # Use the newest timestamp from successfully processed articles
             newest_timestamp = self.newest_successful_timestamp
             
             # Only save timestamp if we processed ALL available articles AND made progress
-            # The saved timestamp becomes the 'ot' parameter for the next run
-            # If we got exactly max_articles, there might be more unprocessed articles,
-            # so don't update timestamp to avoid missing articles on next run
-            
-            # Check if we actually made progress (newest timestamp is different from starting timestamp)
             made_progress = True
             if since_timestamp and newest_timestamp:
                 try:
                     made_progress = int(newest_timestamp) > int(since_timestamp)
                 except (ValueError, TypeError):
-                    made_progress = True  # If we can't compare, assume progress was made
+                    made_progress = True
             
             should_save_timestamp = (
                 use_timestamp_tracking and 
                 newest_timestamp and 
                 not dry_run and
-                made_progress and  # Only save if we actually made progress
-                (len(articles) < max_articles or force_timestamp_update)  # Allow override with force flag
+                made_progress and
+                (total_processed < max_articles or force_timestamp_update)
             )
             
             if should_save_timestamp:
                 self._save_last_timestamp(newest_timestamp)
-                print(f"Saved newest microsecond timestamp for next run: {newest_timestamp}")
-                if force_timestamp_update and len(articles) == max_articles:
+                print(f"\nSaved newest microsecond timestamp for next run: {newest_timestamp}")
+                if force_timestamp_update and total_processed >= max_articles:
                     print("WARNING: Timestamp updated despite hitting max-articles limit")
                     print("Some articles may have been skipped on next run")
             elif use_timestamp_tracking and not newest_timestamp and self.stats['errors'] > 0:
-                print(f"Timestamp not updated - all articles had errors during tagging")
+                print(f"\nTimestamp not updated - all articles had errors during tagging")
                 print("Fix the errors and run again to process these articles")
             elif use_timestamp_tracking and newest_timestamp and not made_progress:
-                print("No progress made - keeping existing timestamp (all successfully processed articles had same or older microsecond timestamp)")
-            elif len(articles) == max_articles and use_timestamp_tracking:
-                print(f"Processed {max_articles} articles (limit reached)")
+                print("\nNo progress made - keeping existing timestamp")
+            elif total_processed >= max_articles and use_timestamp_tracking:
+                print(f"\nProcessed {max_articles} articles (limit reached)")
                 print("Timestamp not updated - there may be more unprocessed articles")
                 print("Run again without --max-articles to process remaining articles")
                 print("Or use --force-timestamp-update to update timestamp anyway (may skip articles)")
@@ -461,94 +570,124 @@ class InoreaderTagger:
             print(f"Error processing articles: {e}")
             self.stats['errors'] += 1
     
-    def _process_single_article(self, article: Dict, dry_run: bool) -> bool:
-        """Process a single article
+    def _process_article_batch(self, articles: List[Dict], dry_run: bool) -> List[Dict]:
+        """Process a batch of articles and apply tags using batch API calls
         
+        Args:
+            articles: List of articles to process
+            dry_run: If True, don't actually apply tags
+            
         Returns:
-            bool: True if article was processed successfully, False otherwise
+            List of result dicts with keys: success, skipped, errors
         """
-        title = article.get('title', 'Untitled')
-        article_id = article.get('id', '')
+        # Group articles by tags they need
+        tag_to_articles = {}  # tag -> list of (article_id, article_title)
+        results = []
         
-        # Get canonical URL
-        canonical = article.get('canonical', [])
-        url = canonical[0].get('href') if canonical else article.get('alternate', [{}])[0].get('href', '')
+        print("\nAnalyzing articles...")
         
-        if not url:
-            print(f"  - Skipping '{title}': No URL found")
-            self.stats['skipped'] += 1
-            return False
+        for article in articles:
+            title = article.get('title', 'Untitled')
+            article_id = article.get('id', '')
+            
+            # Get canonical URL
+            canonical = article.get('canonical', [])
+            url = canonical[0].get('href') if canonical else article.get('alternate', [{}])[0].get('href', '')
+            
+            if not url:
+                print(f"  - Skipping '{title}': No URL found")
+                results.append({'success': False, 'skipped': True, 'errors': 0})
+                continue
+            
+            # Match URL against patterns
+            tags_to_apply = self.matcher.match_url(url)
+            
+            if not tags_to_apply:
+                if self.verbose:
+                    print(f"  - No tags matched for '{title}' ({url})")
+                results.append({'success': False, 'skipped': True, 'errors': 0})
+                continue
+            
+            # Get existing tags from article categories
+            existing_tags = set()
+            categories = article.get('categories', [])
+            for category in categories:
+                if '/label/' in category:
+                    tag_name = category.split('/label/')[-1]
+                    existing_tags.add(tag_name)
+            
+            # Filter out tags that are already applied
+            tags_to_add = [tag for tag in tags_to_apply if tag not in existing_tags]
+            
+            if not tags_to_add:
+                if self.verbose:
+                    print(f"  - '{title[:40]}...' already has all tags")
+                results.append({'success': True, 'skipped': True, 'errors': 0})
+                continue
+            
+            # Group by tag for batch operations
+            for tag in tags_to_add:
+                if tag not in tag_to_articles:
+                    tag_to_articles[tag] = []
+                tag_to_articles[tag].append((article_id, title, url))
+            
+            results.append({'success': False, 'skipped': False, 'errors': 0})  # Will update after tagging
         
-        # Match URL against patterns
-        tags_to_apply = self.matcher.match_url(url)
+        if not tag_to_articles:
+            print("  No articles need tagging")
+            return results
         
-        if not tags_to_apply:
-            print(f"  - No tags matched for '{title}' ({url})")
-            self.stats['skipped'] += 1
-            return False
-        
-        # Get existing tags from article categories
-        existing_tags = set()
-        categories = article.get('categories', [])
-        for category in categories:
-            if '/label/' in category:
-                # Extract tag name from category like "user/1005421489/label/Reddit"
-                tag_name = category.split('/label/')[-1]
-                existing_tags.add(tag_name)
-        
-        # Filter out tags that are already applied
-        tags_to_add = [tag for tag in tags_to_apply if tag not in existing_tags]
-        already_applied = [tag for tag in tags_to_apply if tag in existing_tags]
-        
-        print(f"\n  Article: {title}")
-        print(f"  URL: {url}")
-        print(f"  Matched tags: {', '.join(tags_to_apply)}")
-        
-        if already_applied:
-            print(f"  Already has tags: {', '.join(already_applied)}")
-        
-        if not tags_to_add:
-            print(f"  All tags already applied - skipping")
-            self.stats['skipped'] += 1
-            return True  # Return True since article already has correct tags
-        
-        print(f"  Tags to add: {', '.join(tags_to_add)}")
+        # Display what we're about to do
+        print(f"\nFound {len([r for r in results if not r['skipped']])} articles needing tags:")
+        for tag, article_list in sorted(tag_to_articles.items()):
+            print(f"  Tag '{tag}': {len(article_list)} articles")
+            if self.verbose:
+                for _, title, url in article_list[:3]:
+                    print(f"    - {title[:50]}...")
+                if len(article_list) > 3:
+                    print(f"    ... and {len(article_list) - 3} more")
         
         if dry_run:
-            print(f"  [DRY RUN] Would apply the following tags:")
-            for tag in tags_to_add:
-                print(f"    ✓ Would add tag: {tag}")
-            self.stats['tagged'] += 1  # Count as tagged for stats in dry run
-            return True  # Return True for dry run
+            print(f"\n[DRY RUN] Would make {len(tag_to_articles)} batch API calls")
+            # Mark all as success in dry run
+            for i, result in enumerate(results):
+                if not result['skipped']:
+                    results[i] = {'success': True, 'skipped': False, 'errors': 0}
+            return results
         
-        # Apply tags
-        success = True
-        for tag in tags_to_add:
+        # Apply tags in batches (one API call per tag)
+        print(f"\nApplying tags ({len(tag_to_articles)} batch API calls)...")
+        result_index = 0
+        for tag, article_list in sorted(tag_to_articles.items()):
+            article_ids = [article_id for article_id, _, _ in article_list]
+            
             try:
-                if self.verbose:
-                    print(f"    → Attempting to apply tag: {tag} to article ID: {article_id}")
-                
-                tag_success, error_msg = self.api.add_tag_to_article(article_id, tag)
-                if tag_success:
-                    print(f"    ✓ Applied tag: {tag}")
+                success, error_msg = self.api.add_tag_to_articles_batch(article_ids, tag)
+                if success:
+                    print(f"  ✓ Applied tag '{tag}' to {len(article_ids)} articles")
+                    # Mark all these articles as successfully tagged
+                    for i, result in enumerate(results):
+                        if not result['skipped'] and not result['success']:
+                            results[i] = {'success': True, 'skipped': False, 'errors': 0}
                 else:
-                    print(f"    ✗ Failed to apply tag: {tag}")
+                    print(f"  ✗ Failed to apply tag '{tag}' to {len(article_ids)} articles")
                     if error_msg:
-                        print(f"      Error: {error_msg}")
-                    success = False
-                    self.stats['errors'] += 1
+                        print(f"    Error: {error_msg}")
+                    # Mark these articles as having errors
+                    for i, result in enumerate(results):
+                        if not result['skipped'] and not result['success']:
+                            results[i]['errors'] += 1
             except Exception as e:
-                print(f"    ✗ Error applying tag {tag}: {e}")
+                print(f"  ✗ Error applying tag '{tag}': {e}")
                 if self.verbose:
                     import traceback
-                    print(f"      Full traceback: {traceback.format_exc()}")
-                success = False
-                self.stats['errors'] += 1
+                    print(f"    Full traceback: {traceback.format_exc()}")
+                # Mark these articles as having errors
+                for i, result in enumerate(results):
+                    if not result['skipped'] and not result['success']:
+                        results[i]['errors'] += 1
         
-        if success and tags_to_add:
-            self.stats['tagged'] += 1
-        
-        return success
+        return results
     
     def _load_last_timestamp(self) -> Optional[str]:
         """Load the last processed microsecond timestamp from file (used as 'ot' parameter for next run)"""
@@ -607,6 +746,7 @@ def main():
     parser.add_argument('--config', default='config.json', help='Configuration file path')
     parser.add_argument('--dry-run', action='store_true', help='Run without actually applying tags')
     parser.add_argument('--max-articles', type=int, default=100, help='Maximum number of articles to process')
+    parser.add_argument('--batch-size', type=int, default=25, help='Number of articles to fetch and process per batch')
     parser.add_argument('--force-timestamp-update', action='store_true', help='Update timestamp even when hitting max-articles limit (may skip articles)')
     parser.add_argument('--no-timestamp-tracking', action='store_true', help='Disable timestamp tracking (process all unread articles)')
     parser.add_argument('--reset-timestamp', action='store_true', help='Reset timestamp tracking (start fresh)')
@@ -727,7 +867,8 @@ def main():
     print(f"{'='*50}\n")
     
     tagger.process_articles(
-        max_articles=args.max_articles, 
+        max_articles=args.max_articles,
+        batch_size=args.batch_size,
         dry_run=args.dry_run, 
         folder_name=folder_name,
         use_timestamp_tracking=use_timestamp_tracking,

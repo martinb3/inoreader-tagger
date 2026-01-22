@@ -33,8 +33,16 @@ class TagMigrator:
             r'^reddit$',           # Match plain 'reddit' tag
         ]
     
-    def process_articles_by_old_tags(self, batch_size: int = 100, max_articles: int = None, folder_filter: str = None, feed_filter: str = None, dry_run: bool = True):
-        """Process articles by searching for specific old tags first - much more efficient!"""
+    def process_articles_by_old_tags(self, batch_size: int = 25, max_articles: int = None, folder_filter: str = None, feed_filter: str = None, dry_run: bool = True):
+        """Process articles by searching for specific old tags first, using batch API calls
+        
+        Args:
+            batch_size: Number of articles to fetch and process per batch
+            max_articles: Maximum total articles to migrate
+            folder_filter: Only process articles in this folder
+            feed_filter: Only process articles from feeds containing this string
+            dry_run: If True, don't actually make changes
+        """
         
         migrated_count = 0
         processed_count = 0
@@ -77,7 +85,8 @@ class TagMigrator:
                         print(f"    No more articles with tag '{old_tag}'")
                         break
                     
-                    # Process each article with this old tag
+                    # Filter articles if needed
+                    filtered_articles = []
                     for article in articles:
                         processed_count += 1
                         
@@ -94,27 +103,38 @@ class TagMigrator:
                             if feed_filter.lower() not in feed_title:
                                 continue
                         
-                        migrated_count += 1
-                        print(f"\n[{migrated_count}] Processing article with old tag '{old_tag}'...")
+                        filtered_articles.append(article)
                         
-                        try:
-                            self.migrate_article_tags(article, dry_run=dry_run)
-                        except Exception as e:
-                            print(f"\n💥 FATAL ERROR processing article {migrated_count}: {e}")
-                            print(f"Article: {article.get('title', 'Unknown')}")
-                            print(f"URL: {self._get_article_url(article)}")
-                            print(f"\n🛑 Stopping migration due to error")
-                            print(f"📊 Progress before error: {migrated_count} articles with old tags processed out of {processed_count} total articles scanned")
-                            self.stats['errors'] += 1
-                            raise
-                        
-                        # Stop if we've reached max articles to migrate
-                        if max_articles and migrated_count >= max_articles:
-                            print(f"\n✅ Reached maximum of {max_articles} articles to migrate")
+                        if max_articles and (migrated_count + len(filtered_articles)) >= max_articles:
+                            filtered_articles = filtered_articles[:max_articles - migrated_count]
                             break
                     
-                    # Stop if we've reached max articles or no continuation
-                    if not continuation or (max_articles and migrated_count >= max_articles):
+                    if not filtered_articles:
+                        if not continuation:
+                            break
+                        time.sleep(0.5)
+                        continue
+                    
+                    print(f"\n  Processing batch of {len(filtered_articles)} articles...")
+                    
+                    # Process this batch using batch operations
+                    try:
+                        batch_migrated = self._migrate_article_batch(filtered_articles, dry_run=dry_run)
+                        migrated_count += batch_migrated
+                    except Exception as e:
+                        print(f"\n💥 FATAL ERROR processing batch: {e}")
+                        print(f"\n🛑 Stopping migration due to error")
+                        print(f"📊 Progress before error: {migrated_count} articles migrated out of {processed_count} total articles scanned")
+                        self.stats['errors'] += 1
+                        raise
+                    
+                    # Stop if we've reached max articles
+                    if max_articles and migrated_count >= max_articles:
+                        print(f"\n✅ Reached maximum of {max_articles} articles to migrate")
+                        break
+                    
+                    # Stop if no continuation
+                    if not continuation:
                         break
                         
                     # Small delay to avoid rate limiting
@@ -130,7 +150,7 @@ class TagMigrator:
             
             print(f"    ✅ Completed processing tag '{old_tag}'")
         
-        print(f"\n🏁 Final results: Processed {migrated_count} articles with old tags out of {processed_count} total articles scanned")
+        print(f"\n🏁 Final results: Migrated {migrated_count} articles with old tags out of {processed_count} total articles scanned")
     
     def _find_old_tags_in_system(self) -> List[str]:
         """Find all old tags that exist in the user's tag list"""
@@ -184,6 +204,136 @@ class TagMigrator:
             return alternate[0].get('href', '')
         
         return ''
+    
+    def _migrate_article_batch(self, articles: List[Dict], dry_run: bool = True) -> int:
+        """Migrate tags for a batch of articles using batch API calls
+        
+        Args:
+            articles: List of articles to migrate
+            dry_run: If True, don't actually make changes
+            
+        Returns:
+            Number of articles successfully migrated
+        """
+        # Analyze all articles and group operations
+        tag_removals = {}  # tag -> list of article_ids
+        tag_additions = {}  # tag -> list of article_ids
+        article_info = {}  # article_id -> {title, url, tags_to_remove, tags_to_add}
+        
+        print("    Analyzing articles...")
+        
+        for article in articles:
+            article_id = article.get('id', '')
+            title = article.get('title', 'Untitled')
+            
+            if not article_id:
+                print(f"      ⚠️  Skipping article with no ID: {title}")
+                continue
+            
+            # Get current tags
+            current_tags = self._extract_tags_from_article(article)
+            
+            # Get the article URL and determine correct tags
+            article_url = self._get_article_url(article)
+            if not article_url:
+                print(f"      ⚠️  No URL found for article: {title}")
+                continue
+            
+            # Use the URL matcher to get correct tags for this article
+            correct_tags = set(self.url_matcher.match_url(article_url))
+            
+            # Find old reddit tags to remove
+            tags_to_remove = [tag for tag in current_tags if self._should_remove_old_tag(tag)]
+            
+            # Find new tags to add (that aren't already present)
+            tags_to_add = [tag for tag in correct_tags if tag not in current_tags]
+            
+            if not tags_to_remove and not tags_to_add:
+                continue
+            
+            # Store article info
+            article_info[article_id] = {
+                'title': title,
+                'url': article_url,
+                'tags_to_remove': tags_to_remove,
+                'tags_to_add': tags_to_add
+            }
+            
+            # Group by tags for batch operations
+            for tag in tags_to_remove:
+                if tag not in tag_removals:
+                    tag_removals[tag] = []
+                tag_removals[tag].append(article_id)
+            
+            for tag in tags_to_add:
+                if tag not in tag_additions:
+                    tag_additions[tag] = []
+                tag_additions[tag].append(article_id)
+        
+        if not article_info:
+            print("      No articles need migration in this batch")
+            return 0
+        
+        # Display what we're about to do
+        print(f"      {len(article_info)} articles need migration:")
+        if tag_removals:
+            print(f"        Removing {len(tag_removals)} old tag(s):")
+            for tag, article_ids in sorted(tag_removals.items()):
+                print(f"          - '{tag}': {len(article_ids)} articles")
+        if tag_additions:
+            print(f"        Adding {len(tag_additions)} new tag(s):")
+            for tag, article_ids in sorted(tag_additions.items()):
+                print(f"          - '{tag}': {len(article_ids)} articles")
+        
+        if dry_run:
+            print(f"      [DRY RUN] Would make {len(tag_removals) + len(tag_additions)} batch API calls")
+            self.stats['articles_updated'] += len(article_info)
+            self.stats['tags_removed'] += sum(len(ids) for ids in tag_removals.values())
+            self.stats['tags_added'] += sum(len(ids) for ids in tag_additions.values())
+            return len(article_info)
+        
+        # Perform batch removals
+        if tag_removals:
+            print(f"      Removing old tags ({len(tag_removals)} batch API calls)...")
+            for tag, article_ids in sorted(tag_removals.items()):
+                try:
+                    success, error_msg = self.api.remove_tag_from_articles_batch(article_ids, tag)
+                    if success:
+                        print(f"        ✓ Removed '{tag}' from {len(article_ids)} articles")
+                        self.stats['tags_removed'] += len(article_ids)
+                    else:
+                        print(f"        ✗ Failed to remove '{tag}' from {len(article_ids)} articles")
+                        if error_msg:
+                            print(f"          Error: {error_msg}")
+                        self.stats['errors'] += 1
+                        raise Exception(f"Failed to remove tag '{tag}': {error_msg}")
+                except Exception as e:
+                    print(f"        ✗ Error removing tag '{tag}': {e}")
+                    self.stats['errors'] += 1
+                    raise
+        
+        # Perform batch additions
+        if tag_additions:
+            print(f"      Adding new tags ({len(tag_additions)} batch API calls)...")
+            for tag, article_ids in sorted(tag_additions.items()):
+                try:
+                    success, error_msg = self.api.add_tag_to_articles_batch(article_ids, tag)
+                    if success:
+                        print(f"        ✓ Added '{tag}' to {len(article_ids)} articles")
+                        self.stats['tags_added'] += len(article_ids)
+                    else:
+                        print(f"        ✗ Failed to add '{tag}' to {len(article_ids)} articles")
+                        if error_msg:
+                            print(f"          Error: {error_msg}")
+                        self.stats['errors'] += 1
+                        raise Exception(f"Failed to add tag '{tag}': {error_msg}")
+                except Exception as e:
+                    print(f"        ✗ Error adding tag '{tag}': {e}")
+                    self.stats['errors'] += 1
+                    raise
+        
+        self.stats['articles_updated'] += len(article_info)
+        return len(article_info)
     
     def migrate_article_tags(self, article: Dict, dry_run: bool = True) -> bool:
         """Migrate tags for a single article"""
@@ -303,12 +453,13 @@ class TagMigrator:
         
         return success
     
-    def migrate_all_tags(self, dry_run: bool = True, max_articles: int = None, batch_size: int = 100, folder_filter: str = None, feed_filter: str = None):
+    def migrate_all_tags(self, dry_run: bool = True, max_articles: int = None, batch_size: int = 25, folder_filter: str = None, feed_filter: str = None):
         """Migrate tags for all relevant articles"""
         print("="*60)
         print("INOREADER TAG MIGRATION")
         print("="*60)
         print(f"Mode: {'DRY RUN' if dry_run else 'LIVE MIGRATION'}")
+        print(f"Batch size: {batch_size} articles per batch")
         print(f"Max articles: {max_articles or 'No limit'}")
         if folder_filter:
             print(f"Folder filter: '{folder_filter}'")
@@ -320,10 +471,12 @@ class TagMigrator:
         print("Migration approach:")
         print("  - Find existing old tags in the system")
         print("  - Process articles by old tag (instead of chronologically)")
+        print("  - Fetch articles in batches")
+        print("  - Group tag operations within each batch")
+        print("  - Use batch API calls (one per tag) to maximize efficiency")
         print("  - Remove old reddit-* tags")
         print("  - Extract correct tags from article URLs using current tagging rules")
         print("  - Apply correct tags based on actual subreddit")
-        print("  - This targets articles that need migration directly!")
         print()
         
         # Process articles by targeting old tags directly - much more efficient!
