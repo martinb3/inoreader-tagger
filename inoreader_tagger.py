@@ -19,12 +19,13 @@ class InoreaderAPI:
     BASE_URL = "https://www.inoreader.com/reader/api/0"
     AUTH_URL = "https://www.inoreader.com/oauth2/token"
     
-    def __init__(self, app_id: str, app_key: str, refresh_token: Optional[str] = None):
+    def __init__(self, app_id: str, app_key: str, refresh_token: Optional[str] = None, config_path: Optional[str] = None):
         self.app_id = app_id
         self.app_key = app_key
         self.access_token = None
         self.refresh_token = refresh_token
         self.oauth_state = None  # Store state for OAuth flow
+        self.config_path = config_path  # Store config path for clearing invalid tokens
         
         if refresh_token:
             self.refresh_access_token()
@@ -71,6 +72,38 @@ class InoreaderAPI:
         }
         
         response = requests.post(self.AUTH_URL, data=data)
+        
+        # Handle invalid refresh token by clearing it from config
+        if response.status_code == 400:
+            try:
+                error_data = response.json()
+                if error_data.get('error') == 'invalid_grant':
+                    print(f"\n✗ Refresh token is invalid or expired.")
+                    
+                    # Clear the invalid token from config file if we have the path
+                    if self.config_path:
+                        try:
+                            with open(self.config_path, 'r') as f:
+                                config = json.load(f)
+                            config['refresh_token'] = ""
+                            with open(self.config_path, 'w') as f:
+                                json.dump(config, f, indent=2)
+                            print(f"✓ Cleared invalid refresh token from {self.config_path}")
+                            print("\nPlease run the script again to re-authenticate.\n")
+                        except Exception as e:
+                            print(f"Warning: Could not clear token from config: {e}")
+                    
+                    # Clear the token from this instance
+                    self.refresh_token = None
+                    raise ValueError("Invalid refresh token. Please re-authenticate by running the script again.")
+            except json.JSONDecodeError:
+                pass
+        
+        # Provide more detailed error information for other errors
+        if response.status_code != 200:
+            print(f"Error refreshing token: {response.status_code}")
+            print(f"Response: {response.text}")
+        
         response.raise_for_status()
         
         token_data = response.json()
@@ -549,6 +582,7 @@ def main():
     parser.add_argument('--force-timestamp-update', action='store_true', help='Update timestamp even when hitting max-articles limit (may skip articles)')
     parser.add_argument('--no-timestamp-tracking', action='store_true', help='Disable timestamp tracking (process all unread articles)')
     parser.add_argument('--reset-timestamp', action='store_true', help='Reset timestamp tracking (start fresh)')
+    parser.add_argument('--reauth', action='store_true', help='Force re-authentication (clears refresh token)')
     
     args = parser.parse_args()
     
@@ -564,11 +598,19 @@ def main():
         print(f"Error parsing configuration file: {e}")
         return
     
+    # Handle re-authentication flag
+    if args.reauth:
+        config['refresh_token'] = ""
+        with open(args.config, 'w') as f:
+            json.dump(config, f, indent=2)
+        print("✓ Refresh token cleared. Starting re-authentication...\n")
+    
     # Initialize API
     api = InoreaderAPI(
         app_id=config['app_id'],
         app_key=config['app_key'],
-        refresh_token=config.get('refresh_token')
+        refresh_token=config.get('refresh_token'),
+        config_path=args.config
     )
     
     # If no refresh token, guide user through authentication
