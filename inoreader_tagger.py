@@ -440,7 +440,7 @@ class InoreaderTagger:
         }
         self.newest_successful_timestamp = None  # Track newest timestamp from successfully processed articles
     
-    def process_articles(self, max_articles: int = 100, batch_size: int = 25, dry_run: bool = False, folder_name: Optional[str] = None, use_timestamp_tracking: bool = True, force_timestamp_update: bool = False):
+    def process_articles(self, max_articles: int = 200, batch_size: int = 100, dry_run: bool = False, folder_name: Optional[str] = None, use_timestamp_tracking: bool = True, force_timestamp_update: bool = False):
         """Process articles and apply tags based on URL patterns
         
         Args:
@@ -493,8 +493,11 @@ class InoreaderTagger:
                 # Process batch and collect articles that need tagging
                 batch_results = self._process_article_batch(articles, dry_run)
                 
-                # Track processed articles for timestamp tracking
-                all_articles_processed.extend(articles)
+                # Track only successfully processed articles (no errors) for timestamp tracking
+                for idx, result in enumerate(batch_results):
+                    if result['errors'] == 0:  # Only track articles without errors
+                        all_articles_processed.append(articles[idx])
+                
                 total_processed += len(articles)
                 
                 # Update statistics
@@ -745,8 +748,8 @@ def main():
     parser = argparse.ArgumentParser(description='Tag Inoreader articles based on URL patterns')
     parser.add_argument('--config', default='config.json', help='Configuration file path')
     parser.add_argument('--dry-run', action='store_true', help='Run without actually applying tags')
-    parser.add_argument('--max-articles', type=int, default=100, help='Maximum number of articles to process')
-    parser.add_argument('--batch-size', type=int, default=25, help='Number of articles to fetch and process per batch')
+    parser.add_argument('--max-articles', type=int, default=200, help='Maximum number of articles to process')
+    parser.add_argument('--batch-size', type=int, default=100, help='Number of articles to fetch and process per batch')
     parser.add_argument('--force-timestamp-update', action='store_true', help='Update timestamp even when hitting max-articles limit (may skip articles)')
     parser.add_argument('--no-timestamp-tracking', action='store_true', help='Disable timestamp tracking (process all unread articles)')
     parser.add_argument('--reset-timestamp', action='store_true', help='Reset timestamp tracking (start fresh)')
