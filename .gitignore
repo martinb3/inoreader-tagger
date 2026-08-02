@@ -4,6 +4,11 @@ config.json
 # Runtime files
 .last_processed_timestamp
 
+# Service state: the SQLite database and the generated token encryption key
+data/
+*.db
+.encryption_key
+
 # Python
 __pycache__/
 *.py[cod]
@@ -28,8 +33,12 @@ wheels/
 
 # Virtual environments
 venv/
+.venv/
 ENV/
 env/
+
+# Test/tooling caches
+.pytest_cache/
 
 # IDE
 .vscode/

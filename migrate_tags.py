@@ -10,7 +10,7 @@ import time
 import re
 import requests
 from typing import Dict, List, Set, Tuple
-from inoreader_tagger import InoreaderAPI, URLPatternMatcher
+from inoreader_tagger import InoreaderAPI, InoreaderError, URLPatternMatcher
 
 
 class TagMigrator:
@@ -541,9 +541,18 @@ def main():
     )
     
     if not api.refresh_token:
-        print("No refresh token found. Please run inoreader_tagger.py first to authenticate.")
+        print("No refresh token found. Connect the account in the service UI, or")
+        print("paste an existing refresh_token into config.json, then re-run.")
         return
-    
+
+    # The API client no longer refreshes implicitly on construction, so mint an
+    # access token before any call is made.
+    try:
+        api.refresh_access_token()
+    except InoreaderError as e:
+        print(f"Could not authenticate: {e}")
+        return
+
     # Initialize URL matcher with the same rules as the main tagger
     url_matcher = URLPatternMatcher(config['tagging_rules'])
     

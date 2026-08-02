@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+{% block subtitle %}{{ cards|length }} connected account{{ '' if cards|length == 1 else 's' }}{% endblock %}
+
+{% block content %}
+
+{% if attention %}
+<div class="banner">
+  <strong>Attention needed.</strong>
+  {% for card in attention %}
+    <a href="/users/{{ card.id }}">{{ card.label }}</a>{{ ", " if not loop.last }}
+  {% endfor %}
+  {{ "needs" if attention|length == 1 else "need" }} attention —
+  most likely the Inoreader connection expired and has to be re-authorized.
+</div>
+{% endif %}
+
+{% if not settings.oauth_configured %}
+<div class="banner">
+  <strong>Server not configured.</strong>
+  INOREADER_APP_ID and INOREADER_APP_KEY are unset, so no account can connect
+  and no run can succeed.
+</div>
+{% endif %}
+
+{% if not cards %}
+<div class="panel">
+  <h2>Nothing connected yet</h2>
+  <p class="muted small">
+    Use <a href="/auth/login">Connect an Inoreader account</a> to authorize an
+    account. It gets a starter set of tagging rules and begins running on a
+    schedule; everything is editable afterwards.
+  </p>
+</div>
+{% endif %}
+
+{% for card in cards %}
+<div class="panel">
+  <h2>
+    <a href="/users/{{ card.id }}">{{ card.label }}</a>
+    {% if card.needs_reauth %}<span class="pill bad">Re-login needed</span>
+    {% elif not card.enabled %}<span class="pill neutral">Paused</span>
+    {% elif card.is_running %}<span class="pill neutral">Running now</span>
+    {% else %}<span class="pill ok">Connected</span>{% endif %}
+    {% if card.dry_run %}<span class="pill warn">Dry run</span>{% endif %}
+  </h2>
+
+  <p class="small muted" style="margin:0 0 0.85rem">
+    Every {{ card.interval_minutes }} min ·
+    {{ card.rule_count }} rule{{ '' if card.rule_count == 1 else 's' }} ·
+    {% if card.folder_filter %}folder “{{ card.folder_filter }}”{% else %}all folders{% endif %} ·
+    next run {{ card.next_run|humantime if card.next_run else "not scheduled" }}
+  </p>
+
+  {% if card.needs_reauth %}
+  <div class="banner" style="margin-bottom:0.85rem">
+    Inoreader rejected the stored credentials.
+    <a href="/auth/login">Re-authorize this account</a> to resume tagging.
+  </div>
+  {% endif %}
+
+  {% if card.runs %}
+  <div class="table-scroll">
+  <table>
+    <thead>
+      <tr>
+        <th>When</th><th>Result</th>
+        <th class="num">Processed</th><th class="num">Tagged</th>
+        <th class="num">Errors</th><th class="num">Took</th><th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for run in card.runs %}
+      <tr>
+        <td>{{ run.started_at|humantime }}{% if run.triggered_manually %}
+            <span class="muted small">manual</span>{% endif %}</td>
+        <td><span class="pill {{ run.tone }}">{{ run.label }}</span></td>
+        <td class="num">{{ run.processed }}</td>
+        <td class="num">{{ run.tagged }}</td>
+        <td class="num">{{ run.errors }}</td>
+        <td class="num">{{ run.duration_seconds|duration }}</td>
+        <td><a class="small" href="/runs/{{ run.id }}">log</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+  <p class="muted small">No runs recorded yet.</p>
+  {% endif %}
+
+  <div class="actions" style="margin-top:0.85rem">
+    <form class="inline" method="post" action="/users/{{ card.id }}/run">
+      <button type="submit">Run now</button>
+    </form>
+    <a class="btn" href="/users/{{ card.id }}">Settings &amp; rules</a>
+  </div>
+</div>
+{% endfor %}
+
+{% endblock %}
