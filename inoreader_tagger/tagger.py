@@ -57,6 +57,10 @@ class RunParameters:
     folder_filter: Optional[str] = None
     dry_run: bool = False
     since_timestamp: Optional[str] = None
+    # Obsolete. It used to override the article-ceiling rule that could stop
+    # the high-water mark advancing. Processing oldest-first removed the need
+    # for both the rule and this escape hatch. Kept so existing callers do not
+    # break; it has no effect.
     force_timestamp_update: bool = False
 
 
@@ -121,20 +125,29 @@ class TaggerEngine:
             self._say(f"Restricted to folder {params.folder_filter!r}.")
 
         processed = tagged = skipped = errors = 0
-        newest_clean_timestamp: Optional[str] = None
         total_fetched = 0
+        continuation: Optional[str] = None
+        reached_end = False
+
+        # The mark may only advance across an unbroken run of successes,
+        # starting from the oldest article. Once anything fails it freezes:
+        # every later article is newer, so moving past the failure would skip
+        # it permanently.
+        safe_mark: Optional[str] = None
+        mark_frozen = False
 
         while total_fetched < params.max_articles:
-            remaining = params.max_articles - total_fetched
-            fetch_count = min(params.batch_size, remaining)
+            fetch_count = min(params.batch_size, params.max_articles - total_fetched)
 
-            articles = self.api.get_unread_articles(
+            articles, continuation = self.api.get_unread_articles(
                 count=fetch_count,
                 folder_name=params.folder_filter,
                 since_timestamp=since,
+                continuation=continuation,
             )
 
             if not articles:
+                reached_end = True
                 if total_fetched == 0:
                     self._say("No new articles to process.")
                 break
@@ -146,21 +159,35 @@ class TaggerEngine:
             tagged += batch.tagged
             skipped += batch.skipped
             errors += batch.errors
-
-            # Only articles that came through with no error can move the mark.
-            for article in batch.clean_articles:
-                stamp = _safe_int(article.get("timestampUsec"))
-                if stamp and (newest_clean_timestamp is None or stamp > int(newest_clean_timestamp)):
-                    newest_clean_timestamp = str(stamp)
-
             total_fetched += len(articles)
 
-            if len(articles) < fetch_count:
-                self._say(f"Reached the end of unread articles ({total_fetched} seen).")
+            # Articles arrive oldest-first, so walking them in order and
+            # stopping at the first failure gives the newest point everything
+            # below which is genuinely done.
+            for article, clean in zip(articles, batch.clean_flags):
+                if not clean:
+                    mark_frozen = True
+                    break
+                stamp = _safe_int(article.get("timestampUsec"))
+                if stamp:
+                    safe_mark = str(stamp)
+            if mark_frozen:
                 break
 
-            if total_fetched < params.max_articles:
-                time.sleep(0.5)
+            # An absent continuation is the only trustworthy end-of-stream
+            # signal. A short page does not mean the stream is exhausted.
+            if not continuation:
+                reached_end = True
+                self._say(f"Reached the end of the stream ({total_fetched} article(s) seen).")
+                break
+
+            time.sleep(0.5)
+
+        if not reached_end and not mark_frozen and total_fetched >= params.max_articles:
+            self._say(
+                f"Stopped at the {params.max_articles}-article ceiling with more still "
+                "available. The next run resumes from the new high-water mark."
+            )
 
         outcome = RunOutcome(
             status=STATUS_SUCCESS,
@@ -172,10 +199,9 @@ class TaggerEngine:
         )
 
         outcome.new_timestamp = self._decide_new_timestamp(
-            newest_clean_timestamp=newest_clean_timestamp,
+            safe_mark=safe_mark,
             since=since,
-            total_fetched=total_fetched,
-            errors=errors,
+            mark_frozen=mark_frozen,
         )
 
         if errors:
@@ -189,48 +215,45 @@ class TaggerEngine:
 
     def _decide_new_timestamp(
         self,
-        newest_clean_timestamp: Optional[str],
+        safe_mark: Optional[str],
         since: Optional[str],
-        total_fetched: int,
-        errors: int,
+        mark_frozen: bool,
     ) -> Optional[str]:
-        """Return the new high-water mark, or None to leave it untouched."""
-        params = self.params
+        """Return the new high-water mark, or None to leave it untouched.
 
-        if params.dry_run:
+        There is deliberately no article-ceiling rule any more. Because
+        articles are processed oldest-first, stopping early leaves a contiguous
+        processed prefix, and advancing to the end of that prefix is always
+        safe — the next run simply resumes from there. Under the old
+        newest-first fetch the same situation left an unprocessed hole *below*
+        the newest article, which is why advancing had to be refused, and why a
+        backlog larger than the ceiling could deadlock the mark forever.
+        """
+        if self.params.dry_run:
             self._say("Dry run — high-water mark left unchanged.")
             return None
 
-        if not newest_clean_timestamp:
-            if errors:
+        if safe_mark is None:
+            if mark_frozen:
                 self._say(
-                    "High-water mark unchanged: every article this run hit an error. "
-                    "They will be retried next run."
+                    "High-water mark unchanged: the oldest article this run could not "
+                    "be tagged. It will be retried next run."
                 )
             return None
 
         # Never move backwards.
-        if since and int(newest_clean_timestamp) <= int(since):
-            self._say("High-water mark unchanged: no newer articles were processed.")
+        if since and int(safe_mark) <= int(since):
+            self._say("High-water mark unchanged: nothing newer was processed cleanly.")
             return None
 
-        # Hitting the ceiling means there may be unfetched articles older than
-        # the newest one we just handled. Advancing would skip them.
-        if total_fetched >= params.max_articles and not params.force_timestamp_update:
+        if mark_frozen:
             self._say(
-                f"High-water mark unchanged: hit the {params.max_articles}-article ceiling, "
-                "so older unread articles may remain. Next run will pick them up."
+                f"Advancing high-water mark to {safe_mark} — stopping short of the first "
+                "article that errored, so it is retried rather than skipped."
             )
-            return None
-
-        if total_fetched >= params.max_articles and params.force_timestamp_update:
-            self._say(
-                "WARNING: advancing the high-water mark despite hitting the article "
-                "ceiling — some articles may be skipped."
-            )
-
-        self._say(f"Advancing high-water mark to {newest_clean_timestamp}.")
-        return newest_clean_timestamp
+        else:
+            self._say(f"Advancing high-water mark to {safe_mark}.")
+        return safe_mark
 
     def _process_batch(self, articles: List[Dict]) -> "_BatchResult":
         """Match a batch and apply its tags, one API call per distinct tag."""
@@ -238,7 +261,10 @@ class TaggerEngine:
         tag_to_indices: Dict[str, List[int]] = {}
         # index -> article, for those that need at least one tag
         needs_tagging: Dict[int, Dict] = {}
-        clean_articles: List[Dict] = []
+        # One flag per input article, in the same order. "Clean" means nothing
+        # failed for it — including articles that simply had no matching rule.
+        # The caller walks these in order to find how far the mark may advance.
+        clean_flags: List[bool] = [True] * len(articles)
         skipped = 0
 
         for index, article in enumerate(articles):
@@ -248,13 +274,11 @@ class TaggerEngine:
                 skipped += 1
                 # No URL means nothing to match, but nothing failed either, so
                 # it must not hold the high-water mark back.
-                clean_articles.append(article)
                 continue
 
             wanted = self.matcher.match_url(url)
             if not wanted:
                 skipped += 1
-                clean_articles.append(article)
                 continue
 
             existing = {
@@ -266,7 +290,6 @@ class TaggerEngine:
 
             if not to_add:
                 skipped += 1
-                clean_articles.append(article)
                 continue
 
             needs_tagging[index] = article
@@ -277,7 +300,7 @@ class TaggerEngine:
             self._say(f"  Nothing to tag in this batch ({skipped} skipped).")
             return _BatchResult(
                 processed=len(articles), tagged=0, skipped=skipped, errors=0,
-                clean_articles=clean_articles,
+                clean_flags=clean_flags,
             )
 
         for tag, indices in sorted(tag_to_indices.items()):
@@ -285,10 +308,9 @@ class TaggerEngine:
 
         if self.params.dry_run:
             self._say(f"  [DRY RUN] would make {len(tag_to_indices)} tag call(s).")
-            clean_articles.extend(needs_tagging.values())
             return _BatchResult(
                 processed=len(articles), tagged=len(needs_tagging), skipped=skipped, errors=0,
-                clean_articles=clean_articles,
+                clean_flags=clean_flags,
             )
 
         # Track failures per article so a single bad tag doesn't discard the
@@ -312,9 +334,8 @@ class TaggerEngine:
                 failed_indices.update(indices)
                 self._say(f"  FAILED to apply {tag!r}: {detail}")
 
-        for index, article in needs_tagging.items():
-            if index not in failed_indices:
-                clean_articles.append(article)
+        for index in failed_indices:
+            clean_flags[index] = False
 
         tagged = len(needs_tagging) - len(failed_indices)
         return _BatchResult(
@@ -322,7 +343,7 @@ class TaggerEngine:
             tagged=tagged,
             skipped=skipped,
             errors=errors,
-            clean_articles=clean_articles,
+            clean_flags=clean_flags,
         )
 
 
@@ -332,7 +353,7 @@ class _BatchResult:
     tagged: int
     skipped: int
     errors: int
-    clean_articles: List[Dict]
+    clean_flags: List[bool]
 
 
 def _canonical_url(article: Dict) -> str:

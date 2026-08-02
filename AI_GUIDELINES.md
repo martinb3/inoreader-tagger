@@ -37,14 +37,29 @@ so **anything older is never examined again**. Advancing it past an article
 that was not successfully tagged loses that article silently — no error, no
 retry, nothing in the logs.
 
-`TaggerEngine._decide_new_timestamp()` is the only place allowed to move it.
-The rules it enforces:
+**Articles are fetched oldest-first (`r=o`).** This is load-bearing, not a
+preference. Processing in ascending order means the processed set is always a
+contiguous prefix, so the mark is a resumable cursor and stopping early is
+safe. Fetching newest-first leaves an unprocessed hole *below* the newest
+article, which makes the mark unsafe to advance at all — and a backlog larger
+than `max_articles` then deadlocks it permanently. Do not change the ordering
+without re-deriving this.
 
-- advance only to the newest article processed with **zero** errors
+**Paging uses the continuation token**, not a page-length check. A full page
+does not mean the stream is exhausted; only an absent `continuation` does. An
+earlier version had no continuation at all, so every extra iteration refetched
+the same articles — doubling API usage and inflating `processed`.
+
+`TaggerEngine._decide_new_timestamp()` is the only place allowed to move the
+mark. The rules it enforces:
+
+- advance to the newest article in the unbroken run of successes from the
+  oldest; **stop at the first failure**, so it is retried rather than skipped
 - never advance on a dry run
 - never advance backwards
-- never advance when the run hit its article ceiling (older unread articles may
-  remain unfetched), unless `force_timestamp_update` is set
+
+There is deliberately no article-ceiling rule — see the docstring for why it
+existed and why oldest-first ordering removed the need for it.
 
 Every one of those has a test in `tests/test_tagger.py`. If you change this
 logic, the tests should change deliberately, not incidentally.

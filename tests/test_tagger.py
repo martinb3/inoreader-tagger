@@ -3,9 +3,10 @@
 Getting this wrong is silent: the mark moves past an article that was never
 tagged and nothing ever revisits it. So each rule about when the mark may move
 gets its own test.
-"""
 
-import pytest
+Articles are fetched oldest-first, which is what makes the mark a resumable
+cursor — everything below it is genuinely done, so stopping early is safe.
+"""
 
 from inoreader_tagger.api import InoreaderAuthError, InoreaderError
 from inoreader_tagger.db import (
@@ -30,24 +31,37 @@ def article(article_id: str, timestamp: int, url: str = "https://example.com/a",
 
 
 class FakeAPI:
-    """Stands in for InoreaderAPI, with scripted batches and failures."""
+    """Stands in for InoreaderAPI, modelling continuation-based paging.
 
-    def __init__(self, batches, tag_failures=(), refresh_error=None):
-        self._batches = list(batches)
+    Pages are returned in order, and every page but the last hands back a
+    continuation token — mirroring the real API, where that token is the only
+    trustworthy signal that the stream is exhausted.
+    """
+
+    def __init__(self, pages, tag_failures=(), refresh_error=None):
+        self._pages = list(pages)
         self._tag_failures = set(tag_failures)
         self._refresh_error = refresh_error
         self.refresh_token = "stored-token"
         self.tag_calls = []
+        self.fetch_calls = []
 
     def refresh_access_token(self):
         if self._refresh_error:
             raise self._refresh_error
         return {"access_token": "fresh"}
 
-    def get_unread_articles(self, count, folder_name=None, since_timestamp=None):
-        if not self._batches:
-            return []
-        return self._batches.pop(0)
+    def get_unread_articles(self, count, folder_name=None, since_timestamp=None,
+                            continuation=None, oldest_first=True):
+        self.fetch_calls.append({"count": count, "continuation": continuation})
+
+        index = 0 if continuation is None else int(continuation)
+        if index >= len(self._pages):
+            return [], None
+
+        page = self._pages[index][:count]
+        next_token = str(index + 1) if index + 1 < len(self._pages) else None
+        return page, next_token
 
     def add_tag_to_articles_batch(self, article_ids, tag_name):
         self.tag_calls.append((tag_name, list(article_ids)))
@@ -57,11 +71,10 @@ class FakeAPI:
 
 
 def run_engine(api, **kwargs):
-    params = RunParameters(rules=RULES, **kwargs)
-    return TaggerEngine(api, params).run()
+    return TaggerEngine(api, RunParameters(rules=RULES, **kwargs)).run()
 
 
-def test_successful_run_advances_the_high_water_mark():
+def test_successful_run_advances_to_the_newest_article():
     api = FakeAPI([[article("a", 100), article("b", 300)]])
     outcome = run_engine(api, max_articles=10, batch_size=10)
 
@@ -70,50 +83,75 @@ def test_successful_run_advances_the_high_water_mark():
     assert outcome.new_timestamp == "300"
 
 
-def test_failed_tagging_keeps_the_mark_and_reports_partial():
-    api = FakeAPI([[article("a", 100)]], tag_failures={"Example"})
-    outcome = run_engine(api, max_articles=10, batch_size=10)
+def test_pagination_follows_the_continuation_token():
+    api = FakeAPI([
+        [article("a", 100), article("b", 200)],
+        [article("c", 300), article("d", 400)],
+    ])
+    outcome = run_engine(api, max_articles=10, batch_size=2)
 
-    assert outcome.status == STATUS_PARTIAL
-    assert outcome.errors == 1
-    # The one article failed, so there is no clean article to advance to.
-    assert outcome.new_timestamp is None
+    # Two distinct pages, not the same page fetched twice.
+    assert [c["continuation"] for c in api.fetch_calls] == [None, "1"]
+    assert outcome.processed == 4
+    assert outcome.new_timestamp == "400"
 
 
-def test_mark_advances_only_to_the_newest_cleanly_processed_article():
-    # 'b' fails its tag; 'a' succeeds with a different tag. The mark must stop
-    # at 'a' so 'b' is retried next run.
+def test_a_full_page_is_not_mistaken_for_the_end_of_the_stream():
+    # The first page is exactly batch_size, so a length check would stop here.
+    # Only the continuation token reveals there is more.
+    api = FakeAPI([
+        [article("a", 100), article("b", 200)],
+        [article("c", 300)],
+    ])
+    outcome = run_engine(api, max_articles=10, batch_size=2)
+
+    assert outcome.processed == 3
+    assert outcome.new_timestamp == "300"
+
+
+def test_hitting_the_article_ceiling_still_advances_the_mark():
+    # The case the old newest-first implementation deadlocked on: a backlog
+    # larger than the ceiling meant the mark could never move at all.
+    api = FakeAPI([
+        [article("a", 100), article("b", 200)],
+        [article("c", 300), article("d", 400)],
+    ])
+    outcome = run_engine(api, max_articles=2, batch_size=2)
+
+    assert outcome.processed == 2
+    assert outcome.new_timestamp == "200"          # next run resumes here
+    assert len(api.fetch_calls) == 1
+
+
+def test_mark_stops_before_the_first_failure():
+    # 'c' fails. The mark must stop at 'b' — advancing to 'd' would skip 'c'
+    # permanently, since everything above the mark is never re-examined.
     rules = [
         {"pattern": "good.com", "match_type": "domain", "tags": ["Good"]},
         {"pattern": "bad.com", "match_type": "domain", "tags": ["Bad"]},
     ]
     api = FakeAPI(
         [[
-            article("a", 100, url="https://good.com/x"),
-            article("b", 500, url="https://bad.com/y"),
+            article("a", 100, url="https://good.com/1"),
+            article("b", 200, url="https://good.com/2"),
+            article("c", 300, url="https://bad.com/3"),
+            article("d", 400, url="https://good.com/4"),
         ]],
         tag_failures={"Bad"},
     )
     outcome = TaggerEngine(api, RunParameters(rules=rules, max_articles=10, batch_size=10)).run()
 
+    assert outcome.status == STATUS_PARTIAL
     assert outcome.errors == 1
-    assert outcome.new_timestamp == "100"
-
-
-def test_hitting_the_article_ceiling_does_not_advance_the_mark():
-    # Exactly max_articles came back, so older unread articles may remain.
-    api = FakeAPI([[article("a", 100), article("b", 200)]])
-    outcome = run_engine(api, max_articles=2, batch_size=2)
-
-    assert outcome.status == STATUS_SUCCESS
-    assert outcome.new_timestamp is None
-
-
-def test_force_flag_advances_despite_the_ceiling():
-    api = FakeAPI([[article("a", 100), article("b", 200)]])
-    outcome = run_engine(api, max_articles=2, batch_size=2, force_timestamp_update=True)
-
     assert outcome.new_timestamp == "200"
+
+
+def test_failure_on_the_oldest_article_leaves_the_mark_untouched():
+    api = FakeAPI([[article("a", 100), article("b", 200)]], tag_failures={"Example"})
+    outcome = run_engine(api, max_articles=10, batch_size=10)
+
+    assert outcome.status == STATUS_PARTIAL
+    assert outcome.new_timestamp is None
 
 
 def test_dry_run_tags_nothing_and_never_advances_the_mark():
@@ -137,7 +175,7 @@ def test_articles_already_carrying_the_tag_are_skipped_not_retagged():
 
     assert outcome.skipped == 1
     assert api.tag_calls == []
-    # Nothing failed, so this article may still advance the mark.
+    # Nothing failed, so this article may still carry the mark forward.
     assert outcome.new_timestamp == "100"
 
 
@@ -147,6 +185,15 @@ def test_articles_without_a_url_are_skipped_cleanly():
 
     assert outcome.skipped == 1
     assert outcome.new_timestamp == "100"
+
+
+def test_empty_stream_is_a_no_op():
+    api = FakeAPI([])
+    outcome = run_engine(api, max_articles=10, batch_size=10)
+
+    assert outcome.status == STATUS_SUCCESS
+    assert outcome.processed == 0
+    assert outcome.new_timestamp is None
 
 
 def test_expired_refresh_token_is_reported_as_auth_required():
@@ -172,12 +219,13 @@ def test_no_rules_is_a_no_op_success():
     assert outcome.new_timestamp is None
 
 
-def test_pagination_stops_when_a_short_batch_comes_back():
-    api = FakeAPI([
-        [article(f"a{i}", 100 + i) for i in range(5)],
-        [article("tail", 900)],
-    ])
-    outcome = run_engine(api, max_articles=20, batch_size=5)
+def test_one_api_call_per_distinct_tag_not_per_article():
+    # Writes are the scarce API zone, so batching by tag is a cost property
+    # worth pinning down.
+    api = FakeAPI([[article(f"a{i}", 100 + i) for i in range(10)]])
+    outcome = run_engine(api, max_articles=50, batch_size=50)
 
-    assert outcome.processed == 6
-    assert outcome.new_timestamp == "900"
+    assert outcome.tagged == 10
+    assert len(api.tag_calls) == 1
+    assert api.tag_calls[0][0] == "Example"
+    assert len(api.tag_calls[0][1]) == 10

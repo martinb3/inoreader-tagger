@@ -128,7 +128,7 @@ python -m inoreader_tagger run
 | `--dry-run` | Match rules but never apply tags |
 | `--max-articles` | Article ceiling for the run (default 200) |
 | `--batch-size` | Articles fetched per API call (default 100) |
-| `--force-timestamp-update` | Advance the high-water mark even when the ceiling was hit |
+| `--force-timestamp-update` | Obsolete and ignored; kept so existing cron entries keep working |
 | `--no-timestamp-tracking` | Reconsider all unread articles |
 | `--reset-timestamp` | Clear the high-water mark and exit |
 | `--timestamp-file` | Where the mark is stored |
@@ -212,8 +212,9 @@ Rules are validated when saved from the status page — a bad regex or an unknow
 
 1. Refresh the access token. If Inoreader rejects the refresh token, the run is
    recorded as **Re-login needed** and the account is flagged on the status page.
-2. Fetch unread articles newer than the account's high-water mark. Read articles
-   are excluded server-side and are never touched.
+2. Fetch unread articles newer than the account's high-water mark, oldest-first,
+   paging with the API's continuation token. Read articles are excluded
+   server-side and are never touched.
 3. Match each article's URL against the rules; skip tags it already has.
 4. Apply tags in batches — one API call per distinct tag.
 5. Advance the high-water mark.
@@ -221,17 +222,20 @@ Rules are validated when saved from the status page — a bad regex or an unknow
 ### About the high-water mark
 
 The mark is the timestamp passed to Inoreader on the next run, so anything older
-is never looked at again. It only advances to the newest article processed
-**with no errors**, and does not advance at all when:
+is never looked at again.
 
-- the run was a dry run,
-- every article errored,
-- or the run hit its article ceiling — meaning older unread articles may remain,
-  so advancing would skip them permanently.
+Articles are fetched **oldest-first**, which makes the mark a resumable cursor:
+everything below it is genuinely processed, so a run that stops early simply
+leaves the next one to carry on from where it reached. The mark advances to the
+newest article in the unbroken run of successes starting from the oldest — and
+stops at the first article that errored, so that article is retried rather than
+skipped.
 
-That last case is why hitting `--max-articles` leaves the mark alone: run again
-and it picks up where it left off. `--force-timestamp-update` overrides this and
-can skip articles.
+It does not advance when the run was a dry run, when the oldest article failed,
+or when nothing newer than the current mark was processed.
+
+Hitting `--max-articles` is not a problem: the mark still advances as far as the
+run got. `--force-timestamp-update` is obsolete and ignored.
 
 ---
 

@@ -184,8 +184,22 @@ class InoreaderAPI:
         count: int = 100,
         folder_name: Optional[str] = None,
         since_timestamp: Optional[str] = None,
-    ) -> List[Dict]:
-        """Fetch unread articles, newest first, optionally scoped to a folder."""
+        continuation: Optional[str] = None,
+        oldest_first: bool = True,
+    ) -> Tuple[List[Dict], Optional[str]]:
+        """Fetch a page of unread articles.
+
+        Returns (articles, continuation). A continuation of None means the end
+        of the stream was reached — that is the only reliable "we have seen
+        everything" signal, and it is what lets the caller safely advance the
+        high-water mark.
+
+        `oldest_first` asks the server for ascending order (`r=o`). That
+        matters: processing oldest-first makes the high-water mark a resumable
+        cursor, because everything below it is genuinely done. Newest-first
+        leaves a hole between the mark and the oldest article of the page, so
+        the mark can never move while a backlog exists.
+        """
         if folder_name:
             encoded_folder = urllib.parse.quote(folder_name, safe="")
             stream_id = f"user/-/label/{encoded_folder}"
@@ -199,6 +213,12 @@ class InoreaderAPI:
             # touched regardless of what the rules match.
             "xt": "user/-/state/com.google/read",
         }
+
+        if oldest_first:
+            params["r"] = "o"
+
+        if continuation:
+            params["c"] = continuation
 
         client_filter_timestamp = None
         if since_timestamp:
@@ -216,10 +236,18 @@ class InoreaderAPI:
         if response.status_code != 200:
             raise InoreaderError(f"Could not fetch articles: {_describe(response)}")
 
-        articles = response.json().get("items", [])
+        payload = response.json()
+        articles = payload.get("items", [])
 
-        # `ot` is honoured server-side but is documented as approximate; filter
-        # again locally so a run can never reprocess what it already handled.
+        # `ot` is honoured server-side but is documented as approximate, so
+        # filter again locally.
+        #
+        # Deliberately >= and not >. Inoreader can give several articles the
+        # same timestampUsec when a crawl ingests them together, so excluding
+        # the boundary would silently drop any sibling sharing the mark's exact
+        # timestamp. Re-including the already-processed article at the boundary
+        # costs nothing: it is skipped as already tagged, and the mark cannot
+        # move backwards.
         if client_filter_timestamp is not None:
             articles = [
                 article
@@ -227,7 +255,7 @@ class InoreaderAPI:
                 if _safe_int(article.get("timestampUsec")) >= client_filter_timestamp
             ]
 
-        return articles
+        return articles, payload.get("continuation")
 
     def get_tags(self) -> List[Dict]:
         response = self._session.get(

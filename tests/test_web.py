@@ -206,7 +206,10 @@ def test_run_records_success_and_advances_the_mark(app_env, monkeypatch):
         def refresh_access_token(self):
             return {}
 
-        def get_unread_articles(self, count, folder_name=None, since_timestamp=None):
+        def get_unread_articles(self, count, folder_name=None, since_timestamp=None,
+                                continuation=None, oldest_first=True):
+            if continuation is not None:
+                return [], None
             return [
                 {
                     "id": "art-1",
@@ -214,7 +217,7 @@ def test_run_records_success_and_advances_the_mark(app_env, monkeypatch):
                     "canonical": [{"href": "https://github.com/foo/bar"}],
                     "categories": [],
                 }
-            ]
+            ], None
 
         def add_tag_to_articles_batch(self, ids, tag):
             return True, ""
@@ -277,7 +280,7 @@ def test_run_history_is_pruned_to_the_configured_limit(app_env, monkeypatch):
             return {}
 
         def get_unread_articles(self, *a, **k):
-            return []
+            return [], None
 
     monkeypatch.setattr("inoreader_tagger.runner.InoreaderAPI", NoopAPI)
 

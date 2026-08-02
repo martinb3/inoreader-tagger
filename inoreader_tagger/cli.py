@@ -32,7 +32,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--force-timestamp-update",
         action="store_true",
-        help="Advance the high-water mark even when the article ceiling was hit (may skip articles)",
+        help="Obsolete and ignored; the high-water mark now advances safely on its own",
     )
     parser.add_argument(
         "--no-timestamp-tracking",
@@ -89,6 +89,14 @@ def run(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+
+    if args.force_timestamp_update:
+        print(
+            "Note: --force-timestamp-update no longer does anything. Articles are "
+            "processed oldest-first, so the high-water mark advances on its own "
+            "without risking skipped articles.",
+            file=sys.stderr,
+        )
 
     since = None
     if not args.no_timestamp_tracking:
