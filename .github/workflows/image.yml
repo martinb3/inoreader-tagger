@@ -1,0 +1,58 @@
+name: Build image
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # No QEMU: this builds x86-64 only, natively. Add
+      # docker/setup-qemu-action back if another architecture is ever added
+      # here, or emulated cross-builds will fail.
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # A digest-pinned tag is what the cluster manifest should reference,
+          # so every build gets an immutable sha- tag alongside the moving ones.
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=long
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          # x86-64 only. Nothing being deployed from this repo runs on another
+          # architecture, and emulating one under QEMU roughly doubled the
+          # build for an image nobody pulled. The Dockerfile is architecture
+          # independent, so other platforms can still be built on demand —
+          # see "Building for another architecture" in the README.
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

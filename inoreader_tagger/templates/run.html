@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}Run {{ run.id }} — Inoreader Tagger{% endblock %}
+{% block subtitle %}<a href="/users/{{ user_id }}">← {{ user_label }}</a>{% endblock %}
+
+{% block content %}
+
+<div class="panel">
+  <h2>
+    Run {{ run.id }}
+    <span class="pill {{ run.tone }}">{{ run.label }}</span>
+    {% if run.triggered_manually %}<span class="pill neutral">Manual</span>{% endif %}
+  </h2>
+
+  <p class="small muted" style="margin:0">
+    Started {{ run.started_at|humantime }} ·
+    took {{ run.duration_seconds|duration }} ·
+    processed {{ run.processed }} ·
+    tagged {{ run.tagged }} ·
+    skipped {{ run.skipped }} ·
+    errors {{ run.errors }}
+  </p>
+
+  {% if run.error_message %}
+  <div class="banner" style="margin:0.85rem 0 0">{{ run.error_message }}</div>
+  {% endif %}
+</div>
+
+<div class="panel">
+  <h2>Log</h2>
+  {% if run.log %}
+  <pre class="log">{{ run.log }}</pre>
+  {% else %}
+  <p class="muted small">No log was recorded for this run.</p>
+  {% endif %}
+</div>
+
+{% endblock %}

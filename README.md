@@ -1,147 +1,181 @@
 # Inoreader Dynamic Tagging
 
-Automatically apply tags to your Inoreader articles based on URL patterns. This script helps you organize your reading list by automatically tagging articles from specific domains, paths, or URL patterns.
+Automatically apply tags to your Inoreader articles based on URL patterns.
+
+Runs two ways:
+
+- **As a service** — a scheduled, multi-account web service with a status page
+  showing whether recent runs succeeded and which accounts need reconnecting.
+- **As a one-shot CLI** — the original single-account, `config.json`,
+  cron-it-yourself workflow.
 
 ## Features
 
-- 🏷️ **Dynamic Tagging**: Automatically apply tags based on URL patterns
-- 🎯 **Multiple Match Types**: Domain, path, full URL, or regex matching
-- 🔄 **OAuth2 Authentication**: Secure authentication with Inoreader
-- 🧪 **Dry Run Mode**: Test your rules before applying them
-- 📊 **Statistics**: See how many articles were processed and tagged
-- ⚙️ **Configurable**: Easy-to-edit JSON configuration file
+- 🏷️ **Dynamic tagging** from URL patterns — domain, path, full URL, or regex
+- 👥 **Multiple accounts**, each with its own rules, schedule and state
+- ⏱️ **Built-in scheduler** — no cron entry needed
+- 📊 **Status page** — recent runs per account, success/failure, and an obvious
+  badge when an Inoreader connection has expired
+- 💾 **Persistent backend** — SQLite (or any SQLAlchemy URL), so state survives
+  restarts
+- 🔐 **Refresh tokens encrypted at rest**
+- 🧪 **Dry-run mode** per account
 
-## Prerequisites
+---
 
-1. **Python 3.7+**
-2. **Inoreader Account** (free or paid)
-3. **Inoreader API Credentials**
+## Running as a service
 
-## Getting API Credentials
+### Quick start with Docker Compose
 
-1. Go to [Inoreader Developer Portal](https://www.inoreader.com/developers/)
-2. Log in with your Inoreader account
-3. Create a new application
-4. Note down your **App ID** and **App Key**
-
-## Installation
-
-1. Clone or download this repository
-
-2. Install required dependencies:
-```bash
-pip install requests
-```
-
-3. Copy the example configuration:
-```bash
-copy config.example.json config.json
-```
-
-4. Edit `config.json` and add your API credentials:
-```json
-{
-  "app_id": "YOUR_APP_ID",
-  "app_key": "YOUR_APP_KEY",
-  "refresh_token": "",
-  "tagging_rules": [...]
-}
-```
-
-## First Time Setup
-
-Run the script for the first time:
+Register an application at the
+[Inoreader Developer Portal](https://www.inoreader.com/developers/) and set its
+redirect URI to `http://localhost:8000/auth/callback`.
 
 ```bash
-python inoreader_tagger.py
+export INOREADER_APP_ID=your_app_id
+export INOREADER_APP_KEY=your_app_key
+docker compose up -d
 ```
 
-The script will:
-1. Provide you with an authorization URL
-2. Ask you to authorize the application in your browser
-3. Request the authorization code from the redirect URL
-4. Save the refresh token to your config file
+Open <http://localhost:8000> and click **Connect an Inoreader account**.
 
-After this one-time setup, the script will automatically refresh tokens as needed.
+The account is created from its Inoreader identity — there are no separate
+passwords to manage. It gets a starter rule set and begins running on a
+schedule; edit the rules and interval from its page.
 
-## Configuration
+### Configuration
 
-### Tagging Rules
+All configuration is environment variables.
 
-Define your tagging rules in `config.json`. Each rule has the following format:
+| Variable | Default | Purpose |
+|---|---|---|
+| `INOREADER_APP_ID` | — | OAuth application ID (required) |
+| `INOREADER_APP_KEY` | — | OAuth application secret (required) |
+| `PUBLIC_BASE_URL` | `http://localhost:8000` | External URL; the OAuth redirect is this + `/auth/callback` |
+| `DATA_DIR` | `/data` | Where the database and generated encryption key live |
+| `DATABASE_URL` | SQLite in `DATA_DIR` | Any SQLAlchemy URL |
+| `SQLITE_JOURNAL_MODE` | `TRUNCATE` | Use `WAL` on a local disk; `TRUNCATE` on NFS (see below) |
+| `ENCRYPTION_KEY` | generated into `DATA_DIR` | Fernet key protecting stored refresh tokens |
+| `DEFAULT_INTERVAL_MINUTES` | `30` | Schedule given to a newly connected account |
+| `DEFAULT_MAX_ARTICLES` | `200` | Article ceiling per run for a new account |
+| `DEFAULT_BATCH_SIZE` | `100` | Articles fetched per API call |
+| `RUN_HISTORY_LIMIT` | `50` | Run records retained per account |
+| `LISTEN_HOST` / `LISTEN_PORT` | `0.0.0.0` / `8000` | Bind address |
+| `LOG_LEVEL` | `INFO` | |
+
+`PUBLIC_BASE_URL` must match the redirect URI registered with Inoreader
+exactly, or authorization fails.
+
+### Endpoints
+
+| Path | Purpose |
+|---|---|
+| `/` | Status page |
+| `/users/{id}` | Account settings, rules, run history |
+| `/runs/{id}` | Full log for one run |
+| `/api/status` | JSON status — `healthy` is `false` when an account needs reconnecting |
+| `/healthz` | Liveness: process up and scheduler thread alive |
+| `/readyz` | Readiness: database reachable |
+
+Monitoring hook:
+
+```bash
+curl -s http://localhost:8000/api/status | jq '.healthy, .needs_reauth'
+```
+
+### Security model
+
+**There is no login.** Anyone who can reach the page can see every connected
+account, change its rules, trigger runs, and remove it. This is a deliberate
+choice for a service on a trusted home network, and it is the wrong default for
+anything else.
+
+Refresh tokens are encrypted at rest with `ENCRYPTION_KEY`, so a leaked database
+file alone does not hand over anyone's reading account. That is the only
+protection there is — put the service behind an authenticating proxy before
+exposing it more widely.
+
+### Storage
+
+SQLite is the default and is enough for this workload: a single writer doing a
+handful of transactions per run.
+
+WAL mode requires shared memory that NFS does not provide, so `TRUNCATE` is the
+default journal mode. On a local disk, set `SQLITE_JOURNAL_MODE=WAL` for better
+concurrency.
+
+**Run exactly one instance.** Two would mean two schedulers double-tagging the
+same articles and two writers on one SQLite file. If you need more, point
+`DATABASE_URL` at Postgres — but the scheduler is still single-instance by
+design.
+
+---
+
+## Running as a CLI
+
+The original workflow, unchanged in behaviour:
+
+```bash
+pip install -r requirements.txt
+cp config.example.json config.json   # then fill in app_id, app_key, refresh_token
+python -m inoreader_tagger run --dry-run
+python -m inoreader_tagger run
+```
+
+| Option | Purpose |
+|---|---|
+| `--config` | Configuration file path (default `config.json`) |
+| `--dry-run` | Match rules but never apply tags |
+| `--max-articles` | Article ceiling for the run (default 200) |
+| `--batch-size` | Articles fetched per API call (default 100) |
+| `--force-timestamp-update` | Advance the high-water mark even when the ceiling was hit |
+| `--no-timestamp-tracking` | Reconsider all unread articles |
+| `--reset-timestamp` | Clear the high-water mark and exit |
+| `--timestamp-file` | Where the mark is stored |
+| `--verbose` | Print the full run log |
+
+Cron:
+
+```
+0 * * * * cd /path/to/inoreader-tagger && python -m inoreader_tagger run
+```
+
+The CLI cannot complete an OAuth flow on its own. Either connect the account
+once through the service and copy the refresh token out, or paste in a token you
+already have.
+
+---
+
+## Tagging rules
+
+A JSON array. Each rule needs a `pattern`, a `match_type`, and a `tags` array.
 
 ```json
 {
   "pattern": "github.com",
   "match_type": "domain",
   "tags": ["GitHub", "Development"],
-  "description": "Optional description"
+  "description": "Optional"
 }
 ```
 
-### Match Types
+### Match types
 
-- **`domain`**: Match the domain or subdomain
-  - Example: `"github.com"` matches `github.com`, `www.github.com`, `gist.github.com`
+| Type | Matches against | Example |
+|---|---|---|
+| `domain` | The host portion | `github.com` matches `gist.github.com` |
+| `path` | The path portion | `/blog/` matches `example.com/blog/post` |
+| `full` | Anywhere in the URL | `python` matches `example.com/python-tutorial` |
+| `regex` | Regex over the full URL | `youtube\.com\|youtu\.be` |
 
-- **`path`**: Match the URL path
-  - Example: `"/blog/"` matches `https://example.com/blog/post-1`
+All matching is case-insensitive. A URL can match several rules and collect tags
+from each; duplicates are removed.
 
-- **`full`**: Match anywhere in the full URL
-  - Example: `"python"` matches `https://example.com/python-tutorial`
+### Capture groups
 
-- **`regex`**: Match using regular expressions
-  - Example: `"youtube\\.com|youtu\\.be"` matches both YouTube domains
-  - **Capture Groups**: Use parentheses to capture parts of the URL for dynamic tagging
-  - Example: `"reddit\\.com/r/([^/]+)"` captures subreddit names
+With `match_type: "regex"`, `{0}` expands to the whole match and `{1}`, `{2}`…
+to capture groups:
 
-### Example Rules
-
-```json
-{
-  "tagging_rules": [
-    {
-      "pattern": "github.com",
-      "match_type": "domain",
-      "tags": ["GitHub", "Development"]
-    },
-    {
-      "pattern": "/api/",
-      "match_type": "path",
-      "tags": ["API", "Documentation"]
-    },
-    {
-      "pattern": "python|django|flask",
-      "match_type": "regex",
-      "tags": ["Python"]
-    },
-    {
-      "pattern": "reddit.com/r/programming",
-      "match_type": "full",
-      "tags": ["Reddit", "Programming"]
-    },
-    {
-      "pattern": "reddit\\.com/r/([^/]+)",
-      "match_type": "regex",
-      "tags": ["Reddit", "r/{1}"],
-      "description": "Tag Reddit articles with subreddit name"
-    }
-  ]
-}
-```
-
-### Advanced Regex with Capture Groups
-
-When using `"match_type": "regex"`, you can capture parts of the URL and use them in your tag names using placeholders:
-
-- `{0}` - The entire matched text
-- `{1}` - First capture group (first set of parentheses)
-- `{2}` - Second capture group (second set of parentheses)
-- And so on...
-
-#### Examples:
-
-**Reddit Subreddit Tagging:**
 ```json
 {
   "pattern": "reddit\\.com/r/([^/]+)",
@@ -149,185 +183,123 @@ When using `"match_type": "regex"`, you can capture parts of the URL and use the
   "tags": ["Reddit", "r/{1}"]
 }
 ```
-- URL: `https://reddit.com/r/programming/comments/xyz`
-- Tags applied: `["Reddit", "r/programming"]`
 
-**GitHub Repository Tagging:**
+`https://reddit.com/r/programming/comments/xyz` → `Reddit`, `r/programming`.
+
+More examples:
+
 ```json
-{
-  "pattern": "github\\.com/([^/]+)/([^/]+)",
-  "match_type": "regex",
-  "tags": ["GitHub", "{1}/{2}", "User:{1}"]
-}
-```
-- URL: `https://github.com/microsoft/vscode/issues/123`
-- Tags applied: `["GitHub", "microsoft/vscode", "User:microsoft"]`
-
-**News Site Section Tagging:**
-```json
-{
-  "pattern": "example-news\\.com/([^/]+)/",
-  "match_type": "regex",
-  "tags": ["News", "Section:{1}"]
-}
-```
-- URL: `https://example-news.com/technology/article-title`
-- Tags applied: `["News", "Section:technology"]`
-
-**YouTube Channel Tagging:**
-```json
-{
-  "pattern": "youtube\\.com/@([^/?]+)",
-  "match_type": "regex",
-  "tags": ["YouTube", "Channel:{1}"]
-}
-```
-- URL: `https://youtube.com/@TechChannel/videos`
-- Tags applied: `["YouTube", "Channel:TechChannel"]`
-
-## Usage
-
-### Basic Usage
-
-Process and tag articles:
-```bash
-python inoreader_tagger.py
+[
+  {
+    "pattern": "github\\.com/([^/]+)/([^/]+)",
+    "match_type": "regex",
+    "tags": ["GitHub", "{1}/{2}", "User:{1}"]
+  },
+  {
+    "pattern": "youtube\\.com/@([^/?]+)",
+    "match_type": "regex",
+    "tags": ["YouTube", "Channel:{1}"]
+  }
+]
 ```
 
-### Dry Run
+Rules are validated when saved from the status page — a bad regex or an unknown
+`match_type` is rejected rather than failing silently at the next run.
 
-Test your rules without actually applying tags:
-```bash
-python inoreader_tagger.py --dry-run
-```
+---
 
-### Limit Articles
+## How a run works
 
-Process only a specific number of articles:
-```bash
-python inoreader_tagger.py --max-articles 50
-```
+1. Refresh the access token. If Inoreader rejects the refresh token, the run is
+   recorded as **Re-login needed** and the account is flagged on the status page.
+2. Fetch unread articles newer than the account's high-water mark. Read articles
+   are excluded server-side and are never touched.
+3. Match each article's URL against the rules; skip tags it already has.
+4. Apply tags in batches — one API call per distinct tag.
+5. Advance the high-water mark.
 
-### Custom Config File
+### About the high-water mark
 
-Use a different configuration file:
-```bash
-python inoreader_tagger.py --config my-config.json
-```
+The mark is the timestamp passed to Inoreader on the next run, so anything older
+is never looked at again. It only advances to the newest article processed
+**with no errors**, and does not advance at all when:
 
-## Command Line Options
+- the run was a dry run,
+- every article errored,
+- or the run hit its article ceiling — meaning older unread articles may remain,
+  so advancing would skip them permanently.
 
-```
---config                 Path to configuration file (default: config.json)
---dry-run                Run without actually applying tags
---max-articles           Maximum number of articles to process (default: 100)
---force-timestamp-update Update timestamp even when hitting max-articles limit (may skip articles)
---no-timestamp-tracking  Disable timestamp tracking (process all unread articles)
---reset-timestamp        Reset timestamp tracking (start fresh)
-```
+That last case is why hitting `--max-articles` leaves the mark alone: run again
+and it picks up where it left off. `--force-timestamp-update` overrides this and
+can skip articles.
 
-## Important: --max-articles and Timestamp Tracking
+---
 
-When using `--max-articles`, the script will **NOT** update the timestamp if it processes exactly the maximum number of articles, since there may be more unprocessed articles. This prevents missing articles on subsequent runs.
+## Development
 
 ```bash
-# Safe: Will not update timestamp if 50 articles found (might be more)
-python inoreader_tagger.py --max-articles 50
-
-# Force update (use with caution): May skip articles on next run
-python inoreader_tagger.py --max-articles 50 --force-timestamp-update
+python -m venv .venv
+.venv/bin/pip install -r requirements-dev.txt
+.venv/bin/python -m pytest tests/ -q
 ```
 
-To process all remaining articles after hitting a limit, run without `--max-articles`:
+Layout:
+
+| Module | Responsibility |
+|---|---|
+| `api.py` | Inoreader HTTP client and OAuth |
+| `matcher.py` | URL → tags, and rule validation |
+| `tagger.py` | The run engine; owns high-water mark logic |
+| `runner.py` | Runs the engine and records the outcome |
+| `scheduler.py` | Per-account recurring jobs |
+| `web.py` | Status page, OAuth, settings |
+| `db.py` | Models and engine |
+| `cli.py` | Single-account command line |
+
+`migrate_tags.py` is a separate one-off tool for reshaping existing tags; it
+still uses `config.json`.
+
+### Building the image
+
 ```bash
-python inoreader_tagger.py  # Process all remaining articles
+docker build -t inoreader-tagger:dev .
 ```
 
-## How It Works
+CI publishes `linux/amd64` to `ghcr.io`. Note that a new GitHub Container
+Registry package is **private by default even when its repository is public**,
+so make it public in the package settings — or configure an image pull secret —
+before anything tries to pull it.
 
-1. **Fetch Articles**: Retrieves unread articles from your Inoreader account
-2. **Match Patterns**: Compares each article's URL against your tagging rules
-3. **Apply Tags**: Automatically applies matching tags to articles
-4. **Report**: Shows statistics about processed articles
+#### Building for another architecture
 
-## Scheduling
+The Dockerfile has no architecture-specific steps, so other platforms build
+fine on demand — they are simply not worth the CI time to publish. With
+buildx and QEMU available:
 
-You can schedule this script to run automatically:
-
-### Windows (Task Scheduler)
-
-1. Open Task Scheduler
-2. Create a new task
-3. Set trigger (e.g., daily at 9 AM)
-4. Set action: `python "C:\path\to\inoreader_tagger.py"`
-
-### Linux/Mac (Cron)
-
-Add to crontab:
 ```bash
-0 9 * * * /usr/bin/python3 /path/to/inoreader_tagger.py
+docker buildx build --platform linux/arm64 -t inoreader-tagger:arm64 --load .
 ```
 
-## Tips
+Or verify several at once without producing an image:
 
-1. **Start with Dry Run**: Always test new rules with `--dry-run` first
-2. **Be Specific**: More specific patterns reduce false matches
-3. **Multiple Tags**: One URL can match multiple rules and receive multiple tags
-4. **Regex Testing**: Test complex regex patterns at [regex101.com](https://regex101.com)
-5. **Rate Limiting**: The script includes small delays to avoid API rate limits
+```bash
+docker buildx build --platform linux/amd64,linux/arm64 --output=type=cacheonly .
+```
 
-## Troubleshooting
+---
 
-### Authentication Errors
-- Make sure your App ID and App Key are correct
-- Try deleting the refresh_token and re-authenticating
+## Upgrading from 1.x
 
-### No Articles Found
-- Check that you have unread articles in Inoreader
-- Verify your API credentials have proper permissions
+`inoreader_tagger.py` is now the package `inoreader_tagger/`, so
+`python inoreader_tagger.py` becomes `python -m inoreader_tagger run`.
+`from inoreader_tagger import InoreaderAPI, URLPatternMatcher` still works.
 
-### Tags Not Applying
-- Run with `--dry-run` to see if tags are being matched
-- Check that tag names don't have special characters
-- Verify your Inoreader account can create tags
+Existing `config.json` files and `.last_processed_timestamp` work unchanged with
+the CLI. The service does not read them — connect the account through the web UI
+and it starts with fresh state.
 
-## Advanced Usage
-
-### Extending the Script
-
-You can modify `inoreader_tagger.py` to add custom functionality:
-
-- **Custom matching logic**: Edit the `URLPatternMatcher` class
-- **Different article streams**: Modify `get_unread_articles()` to use different streams
-- **Additional metadata**: Use article title, summary, or feed source for matching
-- **Tag management**: Add functionality to create, rename, or delete tags
-
-### API Methods
-
-The `InoreaderAPI` class provides these methods:
-
-- `get_stream_contents()` - Get articles from any stream
-- `get_unread_articles()` - Get unread articles
-- `get_tags()` - List all user tags
-- `add_tag_to_article()` - Add a tag to an article
-- `remove_tag_from_article()` - Remove a tag from an article
+---
 
 ## License
 
-MIT License - Feel free to modify and use as needed!
-
-## Support
-
-For issues or questions:
-- Check [Inoreader API Documentation](https://www.inoreader.com/developers/)
-- Review your configuration file for syntax errors
-- Run with `--dry-run` to debug tagging rules
-
-## Changelog
-
-### v1.0.0
-- Initial release
-- Support for domain, path, full, and regex matching
-- OAuth2 authentication
-- Dry run mode
-- Processing statistics
+MIT.

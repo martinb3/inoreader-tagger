@@ -1,176 +1,115 @@
-# Agent Rules for Inoreader Tagger Project
+# Agent Rules for the Inoreader Tagger Project
 
-This file contains guidelines and context for AI assistants (like Claude Sonnet 4.x) working on the Inoreader Tagger project in VS Code.
+Context for AI assistants working on this repository.
 
-## Project Overview
+## What this is
 
-**Inoreader Tagger** is a Python script that automatically applies tags to Inoreader articles based on URL patterns. It supports multiple matching types including domain, path, full URL, and regex with capture groups.
+A Python service that applies tags to Inoreader articles based on URL patterns.
+It runs either as a scheduled multi-account web service with a status page, or
+as a single-account CLI reading `config.json`.
 
-### Key Files
-- `inoreader_tagger.py` - Main application with API wrapper and tagging logic
-- `config.json` - User configuration (gitignored, use `config.example.json` as template)
-- `config.example.json` - Configuration template
-- `requirements.txt` - Python dependencies
-- `README.md` - Comprehensive documentation
+**This repository is public.** No credentials, no real account identifiers, no
+internal hostnames from any private deployment belong in it.
 
-## Code Style and Standards
+## Layout
 
-### Python Guidelines
-- Follow PEP 8 style guidelines
-- Use type hints where appropriate (already implemented in most functions)
-- Maintain existing class structure:
-  - `InoreaderAPI` - API operations and OAuth2 handling
-  - `URLPatternMatcher` - URL pattern matching and regex capture groups
-  - `InoreaderTagger` - Main application logic
-- Preserve error handling patterns and user-friendly error messages
-- Keep the `--dry-run` functionality intact for testing
+| Path | Responsibility |
+|---|---|
+| `inoreader_tagger/api.py` | Inoreader HTTP client and OAuth |
+| `inoreader_tagger/matcher.py` | URL → tags; `validate_rules()` for UI input |
+| `inoreader_tagger/tagger.py` | Run engine; owns high-water mark logic |
+| `inoreader_tagger/runner.py` | Executes a run and records it to the database |
+| `inoreader_tagger/scheduler.py` | Per-account APScheduler jobs |
+| `inoreader_tagger/web.py` | FastAPI app: status page, OAuth, settings |
+| `inoreader_tagger/db.py` | SQLAlchemy models and engine setup |
+| `inoreader_tagger/crypto.py` | Fernet encryption for refresh tokens |
+| `inoreader_tagger/config.py` | Environment-variable settings |
+| `inoreader_tagger/cli.py` | Single-account command line |
+| `migrate_tags.py` | Standalone one-off tag reshaping tool |
+| `tests/` | pytest suite |
 
-### Documentation Standards
-- Maintain comprehensive docstrings for all classes and methods
-- Update README.md when adding new features or changing configuration options
-- Include practical examples in documentation
-- Keep the configuration examples in sync with actual functionality
+## The things that are easy to break
 
-## Architecture Principles
+### The high-water mark
 
-### OAuth2 Flow
-- Preserve the secure OAuth2 implementation with state parameter validation
-- Handle token refresh automatically
-- Store tokens securely in the config file
-- Provide clear user instructions for first-time setup
+`User.last_processed_timestamp` is passed to Inoreader as `ot` on the next run,
+so **anything older is never examined again**. Advancing it past an article
+that was not successfully tagged loses that article silently — no error, no
+retry, nothing in the logs.
 
-### Pattern Matching System
-- Support all existing match types: `domain`, `path`, `full`, `regex`
-- Maintain regex capture group functionality with `{0}`, `{1}`, `{2}` placeholders
-- Preserve case-insensitive matching where appropriate
-- Keep the tag deduplication logic
+`TaggerEngine._decide_new_timestamp()` is the only place allowed to move it.
+The rules it enforces:
 
-### Configuration Management
-- Maintain backwards compatibility with existing config files
-- Validate configuration on startup
-- Provide helpful error messages for configuration issues
-- Keep sensitive data (API keys, tokens) in config.json (gitignored)
+- advance only to the newest article processed with **zero** errors
+- never advance on a dry run
+- never advance backwards
+- never advance when the run hit its article ceiling (older unread articles may
+  remain unfetched), unless `force_timestamp_update` is set
 
-## Feature Development Guidelines
+Every one of those has a test in `tests/test_tagger.py`. If you change this
+logic, the tests should change deliberately, not incidentally.
 
-### Adding New Match Types
-1. Extend the `URLPatternMatcher.get_tags_for_url()` method
-2. Update the README.md documentation with examples
-3. Add validation in the configuration loading
-4. Consider backwards compatibility
+### Auth failure is a distinct outcome
 
-### API Enhancements
-1. Follow Inoreader API rate limiting best practices
-2. Handle API errors gracefully with user-friendly messages
-3. Maintain the existing retry logic for network issues
-4. Preserve OAuth2 token management
+`STATUS_AUTH_REQUIRED` is not the same as `STATUS_FAILED`. It means a human
+must go and re-authorize, and it is what drives the status page's re-login
+badge — the entire point of the status page. Only a 400/401 from the token
+endpoint should produce it; a 500 or a timeout is `STATUS_FAILED`, because
+telling someone to re-authorize during an Inoreader outage is wrong.
 
-### New Configuration Options
-1. Add to both `config.example.json` and document in README.md
-2. Provide sensible defaults
-3. Validate new options on startup
-4. Consider migration path for existing users
+### Read articles
 
-## Testing Guidelines
+Article fetching passes `xt=user/-/state/com.google/read` so read articles are
+excluded server-side. Do not remove this. Tagging articles someone has already
+read is the failure mode users notice most.
 
-### Manual Testing
-- Always test with `--dry-run` mode first
-- Test OAuth2 flow with invalid/expired tokens
-- Verify regex patterns with various URL formats
-- Test with different article volumes using `--max-articles`
-- **Important**: When using `--max-articles`, verify timestamp behavior doesn't skip articles
+### Single instance
 
-### Timestamp Tracking Behavior
-- When `--max-articles` processes exactly the limit, timestamp is NOT updated (prevents missing articles)
-- Only update timestamp when fewer articles than limit are processed (indicating all articles processed)
-- The `--force-timestamp-update` flag can override this behavior but may cause articles to be skipped
+The scheduler and SQLite both assume one process. `workers=1` in
+`__main__.py`, `replicas: 1` and `strategy: Recreate` in any deployment. Two
+instances double-tag every article.
 
-### Edge Cases to Consider
-- Invalid regex patterns in configuration
-- Network connectivity issues
-- API rate limiting
-- Empty or malformed article data
-- Special characters in tag names
-- Large numbers of articles
+## Conventions
 
-## Security Considerations
+- Type hints on new functions; the codebase already uses them.
+- Comments explain *why*, not *what*. Existing comments follow this — match it.
+- No `print()` outside `cli.py`. The engine collects log lines into
+  `RunOutcome.log_lines` so they can be stored and shown in the UI.
+- Keep `--dry-run` working end to end.
+- Rules are validated in `matcher.validate_rules()`, once, and used by both the
+  web UI and anything else that accepts rule input.
 
-### API Credentials
-- Never commit actual API credentials to the repository
-- Keep `config.json` in `.gitignore`
-- Use secure token storage practices
-- Validate OAuth2 state parameters
+## Security
 
-### Input Validation
-- Validate regex patterns before compilation
-- Sanitize tag names and descriptions
-- Handle malformed URLs gracefully
-- Validate configuration file structure
+- Refresh tokens are encrypted at rest. Never log them, never render them in a
+  template, never add them to `/api/status`.
+- `ENCRYPTION_KEY` losing its value orphans every stored token. Anything that
+  touches key handling needs care.
+- The service has **no authentication** by design. Do not add a feature that
+  assumes it does — e.g. anything destructive that is only guarded by "the user
+  clicked it".
+- OAuth `state` is validated against the session cookie. Keep it.
 
-## Common Tasks and Patterns
+## Testing
 
-### Adding a New CLI Option
-1. Update the argument parser in `main()`
-2. Pass the option through to relevant classes
-3. Document in README.md under "Command Line Options"
-4. Test with both short and long argument forms
-
-### Extending Tag Processing
-1. Modify `URLPatternMatcher._substitute_capture_groups()` for new placeholder types
-2. Update regex documentation in README.md
-3. Add examples showing the new functionality
-4. Consider backwards compatibility with existing tag templates
-
-### API Method Extensions
-1. Follow the existing pattern in `InoreaderAPI` class
-2. Handle authentication and rate limiting consistently
-3. Return structured data that matches existing patterns
-4. Add appropriate error handling and logging
-
-## VS Code Integration
-
-### Recommended Extensions
-- Python extension for syntax highlighting and debugging
-- Python Docstring Generator for maintaining documentation
-- GitLens for git integration and history
-- Regex Previewer for testing regex patterns
-
-### Debug Configuration
-The project can be debugged using VS Code's Python debugger:
-- Set breakpoints in `inoreader_tagger.py`
-- Use `--dry-run` for safe debugging
-- Test with a limited number of articles using `--max-articles 10`
-
-### Workspace Settings
-Consider these workspace settings for consistent development:
-```json
-{
-    "python.defaultInterpreterPath": "./venv/bin/python",
-    "python.linting.enabled": true,
-    "python.linting.pylintEnabled": true,
-    "files.exclude": {
-        "**/__pycache__": true,
-        "config.json": true
-    }
-}
+```bash
+python -m venv .venv
+.venv/bin/pip install -r requirements-dev.txt
+.venv/bin/python -m pytest tests/ -q
 ```
 
-## Version Control Guidelines
+Tests use a fake API client rather than hitting Inoreader. When adding
+behaviour, add the test that would catch its absence — particularly for
+anything touching the high-water mark or run status.
 
-### Commit Messages
-- Use conventional commit format: `type(scope): description`
-- Types: `feat`, `fix`, `docs`, `style`, `refactor`, `test`, `chore`
-- Include context about what changed and why
-- Reference issues if applicable
+Manual checks worth doing before shipping a change to the run engine:
 
-### Branch Strategy
-- Use descriptive branch names: `feature/oauth-improvements`, `fix/regex-escaping`
-- Keep commits focused and atomic
-- Update documentation in the same commit as code changes
+- a dry run leaves the mark untouched
+- an account with a revoked token shows the re-login badge
+- a rule with a bad regex is rejected at save time, not at run time
 
-### File Management
-- Keep `config.json` in `.gitignore` (already configured)
-- Include `config.example.json` with sanitized examples
-- Update requirements.txt when adding dependencies
+## Documentation
 
-This document should be updated as the project evolves to maintain accurate guidance for AI assistants and human developers.
+Update `README.md` in the same change as the code. The environment variable
+table, the endpoint table and the match-type table are load-bearing — someone
+deploying this reads those and nothing else.

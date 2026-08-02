@@ -1,0 +1,22 @@
+# Local development. For the Kubernetes deployment see the README.
+services:
+  tagger:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      # Register an application at https://www.inoreader.com/developers/ and
+      # set its redirect URI to PUBLIC_BASE_URL + /auth/callback.
+      INOREADER_APP_ID: "${INOREADER_APP_ID:?set INOREADER_APP_ID}"
+      INOREADER_APP_KEY: "${INOREADER_APP_KEY:?set INOREADER_APP_KEY}"
+      PUBLIC_BASE_URL: "${PUBLIC_BASE_URL:-http://localhost:8000}"
+      # A local bind mount is a real filesystem, so WAL is safe here. The
+      # Kubernetes deployment overrides this because its volume is NFS.
+      SQLITE_JOURNAL_MODE: "WAL"
+      LOG_LEVEL: "INFO"
+    volumes:
+      - tagger-data:/data
+    restart: unless-stopped
+
+volumes:
+  tagger-data:
