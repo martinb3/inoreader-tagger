@@ -239,13 +239,20 @@ class InoreaderAPI:
         payload = response.json()
         articles = payload.get("items", [])
 
-        # `ot` is honoured server-side but is documented as approximate; filter
-        # again locally so a run can never reprocess what it already handled.
+        # `ot` is honoured server-side but is documented as approximate, so
+        # filter again locally.
+        #
+        # Deliberately >= and not >. Inoreader can give several articles the
+        # same timestampUsec when a crawl ingests them together, so excluding
+        # the boundary would silently drop any sibling sharing the mark's exact
+        # timestamp. Re-including the already-processed article at the boundary
+        # costs nothing: it is skipped as already tagged, and the mark cannot
+        # move backwards.
         if client_filter_timestamp is not None:
             articles = [
                 article
                 for article in articles
-                if _safe_int(article.get("timestampUsec")) > client_filter_timestamp
+                if _safe_int(article.get("timestampUsec")) >= client_filter_timestamp
             ]
 
         return articles, payload.get("continuation")
