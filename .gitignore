@@ -9,6 +9,16 @@ data/
 *.db
 .encryption_key
 
+# Key material, however it gets named. This repository is public, so these
+# patterns are deliberately broad — a missed one is a published secret.
+*encryption-key*
+*encryption_key*
+*.key
+*.pem
+secrets.env
+.env
+.env.*
+
 # Python
 __pycache__/
 *.py[cod]
