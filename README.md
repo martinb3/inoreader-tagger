@@ -259,6 +259,33 @@ Layout:
 `migrate_tags.py` is a separate one-off tool for reshaping existing tags; it
 still uses `config.json`.
 
+### Building the image
+
+```bash
+docker build -t inoreader-tagger:dev .
+```
+
+CI publishes `linux/amd64` to `ghcr.io`. Note that a new GitHub Container
+Registry package is **private by default even when its repository is public**,
+so make it public in the package settings — or configure an image pull secret —
+before anything tries to pull it.
+
+#### Building for another architecture
+
+The Dockerfile has no architecture-specific steps, so other platforms build
+fine on demand — they are simply not worth the CI time to publish. With
+buildx and QEMU available:
+
+```bash
+docker buildx build --platform linux/arm64 -t inoreader-tagger:arm64 --load .
+```
+
+Or verify several at once without producing an image:
+
+```bash
+docker buildx build --platform linux/amd64,linux/arm64 --output=type=cacheonly .
+```
+
 ---
 
 ## Upgrading from 1.x
