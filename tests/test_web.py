@@ -301,3 +301,16 @@ def test_oauth_callback_rejects_a_mismatched_state(app_env):
         "/auth/callback", params={"code": "abc", "state": "forged"}, follow_redirects=True
     )
     assert "state mismatch" in response.text
+
+
+def test_liveness_fails_once_the_database_has_failed_past_the_grace(app_env, monkeypatch):
+    client, app = app_env
+    grace = app.state.settings.db_failure_grace_seconds
+
+    monkeypatch.setattr(app.state.database, "seconds_failing", lambda: grace - 1)
+    assert client.get("/healthz").status_code == 200
+
+    monkeypatch.setattr(app.state.database, "seconds_failing", lambda: grace + 1)
+    response = client.get("/healthz")
+    assert response.status_code == 503
+    assert response.json() == {"status": "database failing"}

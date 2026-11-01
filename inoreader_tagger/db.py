@@ -7,6 +7,7 @@ here, one row per user, so the service can run unattended for many accounts.
 import datetime as dt
 import json
 import logging
+import time
 from typing import Iterator, List, Optional
 
 from sqlalchemy import (
@@ -21,6 +22,7 @@ from sqlalchemy import (
     select,
 )
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
 
 logger = logging.getLogger(__name__)
@@ -28,6 +30,21 @@ logger = logging.getLogger(__name__)
 
 def utcnow() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc)
+
+
+# SQLite result codes meaning the connection's view of the file is broken, not
+# that the file is busy. On NFS a stall can leave an open connection returning
+# SQLITE_IOERR indefinitely while a fresh connection to the same file works, so
+# these are treated as a disconnect: the pool is discarded and rebuilt.
+# SQLITE_BUSY is deliberately absent; reconnecting does not help a lock.
+_RECONNECT_ERROR_NAMES = ("SQLITE_IOERR", "SQLITE_CANTOPEN")
+
+
+def _needs_reconnect(exc: BaseException) -> bool:
+    # sqlite_errorname exists from Python 3.11; matching by prefix also covers
+    # extended codes such as SQLITE_IOERR_READ.
+    name = getattr(exc, "sqlite_errorname", None) or ""
+    return name.startswith(_RECONNECT_ERROR_NAMES)
 
 
 class Base(DeclarativeBase):
@@ -143,6 +160,25 @@ class Database:
         self._settings = settings
         self.engine: Engine = self._make_engine(settings)
         self._session_factory = sessionmaker(bind=self.engine, expire_on_commit=False)
+        # Monotonic time of the first operational error since the last
+        # successful statement; None while the database is answering.
+        self._failing_since: Optional[float] = None
+        self._track_health(self.engine)
+
+    def _track_health(self, engine: Engine) -> None:
+        @event.listens_for(engine, "handle_error")
+        def _on_error(context):
+            if isinstance(context.sqlalchemy_exception, OperationalError) and self._failing_since is None:
+                self._failing_since = time.monotonic()
+
+        @event.listens_for(engine, "after_cursor_execute")
+        def _on_success(*_args):
+            self._failing_since = None
+
+    def seconds_failing(self) -> float:
+        """Seconds since the database started failing with no success since; 0 while it answers."""
+        since = self._failing_since
+        return 0.0 if since is None else time.monotonic() - since
 
     @staticmethod
     def _make_engine(settings) -> Engine:
@@ -168,6 +204,17 @@ class Database:
                 cursor.execute("PRAGMA foreign_keys=ON")
                 cursor.execute("PRAGMA busy_timeout=30000")
                 cursor.close()
+
+            @event.listens_for(engine, "handle_error")
+            def _reconnect_after_io_error(context):
+                # pool_pre_ping alone did not recover from this in production:
+                # a connection stuck on disk I/O errors kept passing the ping.
+                if _needs_reconnect(context.original_exception):
+                    logger.warning(
+                        "SQLite reported %s; discarding pooled connections",
+                        context.original_exception,
+                    )
+                    context.is_disconnect = True
 
         return engine
 
