@@ -81,3 +81,44 @@ def test_busy_database_keeps_the_pooled_connection(monkeypatch, database):
             conn.execute(text("SELECT 1"))
 
     assert driver_connection(database) is before
+
+
+class FakeClock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def run_failing_statement(monkeypatch, database, exc) -> None:
+    fail_next_execute(monkeypatch, database, exc)
+    with pytest.raises(OperationalError):
+        with database.engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+
+
+def test_failure_duration_counts_from_the_first_error(monkeypatch, database):
+    clock = FakeClock()
+    monkeypatch.setattr("inoreader_tagger.db.time.monotonic", clock)
+    assert database.seconds_failing() == 0
+
+    run_failing_statement(monkeypatch, database, sqlite_error("disk I/O error", "SQLITE_IOERR"))
+    clock.now += 60
+    # A second failure must not reset the start of the outage.
+    run_failing_statement(monkeypatch, database, sqlite_error("disk I/O error", "SQLITE_IOERR"))
+    clock.now += 60
+
+    assert database.seconds_failing() == 120
+
+
+def test_a_successful_statement_ends_the_failure(monkeypatch, database):
+    clock = FakeClock()
+    monkeypatch.setattr("inoreader_tagger.db.time.monotonic", clock)
+
+    run_failing_statement(monkeypatch, database, sqlite_error("database is locked", "SQLITE_BUSY"))
+    clock.now += 300
+    assert database.seconds_failing() == 300
+
+    driver_connection(database)
+    assert database.seconds_failing() == 0

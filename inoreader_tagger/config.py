@@ -58,6 +58,11 @@ class Settings:
     # How many run records to retain per user.
     run_history_limit: int
 
+    # How long the database may fail before /healthz reports the process dead
+    # and the orchestrator restarts it. Long enough to ride out a storage stall
+    # of a few minutes without killing the process mid-write.
+    db_failure_grace_seconds: int
+
     listen_host: str
     listen_port: int
     log_level: str
@@ -88,6 +93,7 @@ def load_settings() -> Settings:
         default_max_articles=_int_env("DEFAULT_MAX_ARTICLES", 200),
         default_batch_size=_int_env("DEFAULT_BATCH_SIZE", 100),
         run_history_limit=_int_env("RUN_HISTORY_LIMIT", 50),
+        db_failure_grace_seconds=_int_env("DB_FAILURE_GRACE_SECONDS", 1200),
         listen_host=os.environ.get("LISTEN_HOST", "0.0.0.0"),
         listen_port=_int_env("LISTEN_PORT", 8000),
         log_level=os.environ.get("LOG_LEVEL", "INFO"),

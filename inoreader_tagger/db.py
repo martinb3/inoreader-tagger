@@ -7,6 +7,7 @@ here, one row per user, so the service can run unattended for many accounts.
 import datetime as dt
 import json
 import logging
+import time
 from typing import Iterator, List, Optional
 
 from sqlalchemy import (
@@ -21,6 +22,7 @@ from sqlalchemy import (
     select,
 )
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
 
 logger = logging.getLogger(__name__)
@@ -158,6 +160,25 @@ class Database:
         self._settings = settings
         self.engine: Engine = self._make_engine(settings)
         self._session_factory = sessionmaker(bind=self.engine, expire_on_commit=False)
+        # Monotonic time of the first operational error since the last
+        # successful statement; None while the database is answering.
+        self._failing_since: Optional[float] = None
+        self._track_health(self.engine)
+
+    def _track_health(self, engine: Engine) -> None:
+        @event.listens_for(engine, "handle_error")
+        def _on_error(context):
+            if isinstance(context.sqlalchemy_exception, OperationalError) and self._failing_since is None:
+                self._failing_since = time.monotonic()
+
+        @event.listens_for(engine, "after_cursor_execute")
+        def _on_success(*_args):
+            self._failing_since = None
+
+    def seconds_failing(self) -> float:
+        """Seconds since the database started failing with no success since; 0 while it answers."""
+        since = self._failing_since
+        return 0.0 if since is None else time.monotonic() - since
 
     @staticmethod
     def _make_engine(settings) -> Engine:

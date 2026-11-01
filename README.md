@@ -60,6 +60,7 @@ All configuration is environment variables.
 | `DEFAULT_MAX_ARTICLES` | `200` | Article ceiling per run for a new account |
 | `DEFAULT_BATCH_SIZE` | `100` | Articles fetched per API call |
 | `RUN_HISTORY_LIMIT` | `50` | Run records retained per account |
+| `DB_FAILURE_GRACE_SECONDS` | `1200` | How long the database may keep failing before `/healthz` fails and the process is restarted |
 | `LISTEN_HOST` / `LISTEN_PORT` | `0.0.0.0` / `8000` | Bind address |
 | `LOG_LEVEL` | `INFO` | |
 
@@ -74,7 +75,7 @@ exactly, or authorization fails.
 | `/users/{id}` | Account settings, rules, run history |
 | `/runs/{id}` | Full log for one run |
 | `/api/status` | JSON status — `healthy` is `false` when an account needs reconnecting |
-| `/healthz` | Liveness: process up and scheduler thread alive |
+| `/healthz` | Liveness: scheduler thread alive, and the database not failing for longer than `DB_FAILURE_GRACE_SECONDS` |
 | `/readyz` | Readiness: database reachable |
 
 Monitoring hook:

@@ -445,9 +445,14 @@ def create_app() -> FastAPI:
 
     @app.get("/healthz")
     def healthz():
-        """Liveness: the process is up and the scheduler thread is alive."""
+        """Liveness: the scheduler thread is alive and the database has not been failing for long."""
         if not scheduler.running:
             return JSONResponse({"status": "scheduler stopped"}, status_code=503)
+        # Reconnecting normally clears a database error within a minute. If it
+        # has not, a restart is the remaining remedy; readiness alone would
+        # leave the process unready forever without ever restarting it.
+        if database.seconds_failing() > settings.db_failure_grace_seconds:
+            return JSONResponse({"status": "database failing"}, status_code=503)
         return JSONResponse({"status": "ok"})
 
     @app.get("/readyz")
