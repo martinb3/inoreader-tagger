@@ -30,6 +30,21 @@ def utcnow() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc)
 
 
+# SQLite result codes meaning the connection's view of the file is broken, not
+# that the file is busy. On NFS a stall can leave an open connection returning
+# SQLITE_IOERR indefinitely while a fresh connection to the same file works, so
+# these are treated as a disconnect: the pool is discarded and rebuilt.
+# SQLITE_BUSY is deliberately absent; reconnecting does not help a lock.
+_RECONNECT_ERROR_NAMES = ("SQLITE_IOERR", "SQLITE_CANTOPEN")
+
+
+def _needs_reconnect(exc: BaseException) -> bool:
+    # sqlite_errorname exists from Python 3.11; matching by prefix also covers
+    # extended codes such as SQLITE_IOERR_READ.
+    name = getattr(exc, "sqlite_errorname", None) or ""
+    return name.startswith(_RECONNECT_ERROR_NAMES)
+
+
 class Base(DeclarativeBase):
     pass
 
@@ -168,6 +183,17 @@ class Database:
                 cursor.execute("PRAGMA foreign_keys=ON")
                 cursor.execute("PRAGMA busy_timeout=30000")
                 cursor.close()
+
+            @event.listens_for(engine, "handle_error")
+            def _reconnect_after_io_error(context):
+                # pool_pre_ping alone did not recover from this in production:
+                # a connection stuck on disk I/O errors kept passing the ping.
+                if _needs_reconnect(context.original_exception):
+                    logger.warning(
+                        "SQLite reported %s; discarding pooled connections",
+                        context.original_exception,
+                    )
+                    context.is_disconnect = True
 
         return engine
 
